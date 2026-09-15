@@ -48,7 +48,7 @@ fn command_map() -> serde_json::Map<String, Value> {
 
     let model_option = json!({
         "name": "--model", "type": "string", "required": false,
-        "default": "v5.5 (config `default_model`)", "values": models,
+        "default": "v6 (config `default_model`)", "values": models,
         "description": "Model version"
     });
     let wait_option = json!({
@@ -101,6 +101,10 @@ fn command_map() -> serde_json::Map<String, Value> {
                     {"name": "--lyrics-file", "type": "string", "required": false, "description": "Read lyrics from file"},
                     model_option,
                     {"name": "--vocal", "type": "string", "required": false, "values": ["male", "female"], "description": "Vocal gender"},
+                    {"name": "--duration", "type": "number", "required": false, "description": "Target length in seconds (v6 custom: 10–360; omit for Suno's 180s default)"},
+                    {"name": "--variety", "type": "number", "required": false, "description": "Creative range 0–4 (whole number; v6 Custom)"},
+                    {"name": "--mumble", "type": "bool", "required": false, "default": false, "description": "Non-lexical / mumble vocals (v6; session-gated)"},
+                    {"name": "--max-mode", "type": "bool", "required": false, "default": false, "description": "Max Mode — longer output (v6; account-gated)"},
                     {"name": "--weirdness", "type": "number", "required": false, "description": "0-100"},
                     {"name": "--style-influence", "type": "number", "required": false, "description": "0-100"},
                     {"name": "--audio-influence", "type": "number", "required": false, "description": "0-100"},
@@ -120,6 +124,9 @@ fn command_map() -> serde_json::Map<String, Value> {
                     {"name": "--tags", "type": "string", "required": false, "description": "Style tags"},
                     model_option,
                     {"name": "--vocal", "type": "string", "required": false, "values": ["male", "female"], "description": "Vocal gender"},
+                    {"name": "--variety", "type": "number", "required": false, "description": "Creative range 0–4 (whole number; v6)"},
+                    {"name": "--mumble", "type": "bool", "required": false, "default": false, "description": "Non-lexical / mumble vocals (v6; session-gated)"},
+                    {"name": "--max-mode", "type": "bool", "required": false, "default": false, "description": "Max Mode — longer output (v6; account-gated)"},
                     {"name": "--weirdness", "type": "number", "required": false, "description": "0-100"},
                     {"name": "--style-influence", "type": "number", "required": false, "description": "0-100"},
                     {"name": "--instrumental", "type": "bool", "required": false, "default": false, "description": "No vocals"},
@@ -184,7 +191,7 @@ fn command_map() -> serde_json::Map<String, Value> {
                 "workflow": [
                     "suno write --genre <g> --theme <t> --out song.txt --json",
                     "edit song.txt: replace every <...> span; keep [Section] tags; repeat the chorus verbatim",
-                    "run data.next_action.argv — renders on the configured default model (v5.5, Suno's latest; ~70 credits)",
+                    "run data.next_action.argv — renders on the configured default model (v6, Suno's latest)",
                     "`generate` and `extend` exit 3 if any <...> placeholder survives (unless --force, which disarms that preflight), so no credits are burned on a scaffold"
                 ],
                 "raw_output": "human mode without --out: the lyric skeleton ONLY on stdout (safe to redirect or paste as a lyrics input); title, style prompt, suno tags and handoff on stderr. With --out: nothing on stdout, the file holds lyrics only. JSON envelope when piped or --json"
@@ -230,9 +237,15 @@ fn command_map() -> serde_json::Map<String, Value> {
                 "description": "Remaster a clip with a different model",
                 "args": [clip_id_arg],
                 "options": [
-                    {"name": "--model", "type": "string", "required": false, "default": "v5.5",
+                    {"name": "--model", "type": "string", "required": false, "default": "v6",
                      "values": remaster_model_map().keys().cloned().collect::<Vec<_>>(),
                      "description": "Remaster model version"},
+                    {"name": "--variation", "type": "string", "required": false, "default": "normal",
+                     "values": ["subtle", "normal", "high"],
+                     "description": "Remaster variation strength (not sent for v4.5+)"},
+                    {"name": "--style-profile", "type": "string", "required": false, "default": "boost",
+                     "values": ["natural", "boost", "clarity"],
+                     "description": "v6 remaster tonal profile (chirp-halibut only)"},
                     wait_option, download_option, token_option, no_captcha_option, force_option
                 ]
             }),
@@ -493,7 +506,7 @@ pub fn run() {
     let info = json!({
         "name": "suno",
         "version": env!("CARGO_PKG_VERSION"),
-        "description": "Write, generate, and manage Suno music — a native song composer (`write`), v5.5 generation with voice personas, covers, remasters, and built-in songwriting guides",
+        "description": "Write, generate, and manage Suno music — a native song composer (`write`), v6 generation with voice personas, covers, remasters, and built-in songwriting guides",
         "commands": command_map(),
         // Built-in songwriting knowledge, discoverable via `suno guide <name>`.
         "guides": guide_map(),
@@ -517,6 +530,7 @@ pub fn run() {
             "4": "Rate limited — wait 30-60s and retry",
         },
         "breaking_changes": {
+            "0.10.0": "Default model is v6 (chirp-hawk). New --model values: v6, v6-wild, v6-mini. Remaster default is v6 (chirp-halibut) via POST /api/generate/upsample with --variation and --style-profile.",
             "0.6.0": "Exit codes remapped to the framework contract: auth errors 3→2, not-found 5→3, code 5 removed. `list --json` data is now {clips, next_cursor, has_more}; `list --page` → `--cursor`; `generate --variation` removed."
         },
         "envelope": {
@@ -533,7 +547,7 @@ pub fn run() {
             "path": crate::config::config_path().display().to_string(),
             "env_prefix": "SUNO_",
             "keys": {
-                "default_model": "Default --model for generate/describe/extend/cover (clap name, e.g. v5.5)",
+                "default_model": "Default --model for generate/describe/extend/cover (clap name, e.g. v6)",
                 "poll_interval_secs": "Initial poll backoff for --wait (doubles up to 15s)",
                 "poll_timeout_secs": "Total --wait timeout before giving up",
                 "output_dir": "Default directory for `download`",
@@ -546,13 +560,16 @@ pub fn run() {
         "models": model_map(),
         "remaster_models": remaster_model_map(),
         "generation_cost": {
+            "v6": "account-specific — check `suno credits` / `suno models`",
             "v5.5": "~70 credits per call (35 per clip, 2 clips)",
-            "note": "Older models cost less. `lyrics` is free.",
+            "note": "Older models cost less. `lyrics` is free. v6 pricing is plan-dependent.",
         },
         "features": [
             "song_composer", "priming_mode", "builtin_guides",
             "tags", "negative_tags", "vocal_gender",
             "weirdness", "style_influence", "audio_influence",
+            "duration", "variety", "mumble", "max_mode",
+            "remaster_variation", "remaster_style_profile",
             "instrumental", "extend", "concat", "cover", "remaster",
             "stems", "lyrics", "timed_lyrics", "set_metadata",
             "set_visibility", "search", "delete", "captcha_check",
@@ -573,7 +590,7 @@ pub fn run() {
         },
         "provider": "direct_suno_unofficial",
         "auth_required": true,
-        "default_model": "chirp-fenix (v5.5)",
+        "default_model": "chirp-hawk (v6)",
     });
     println!(
         "{}",
@@ -593,5 +610,9 @@ mod tests {
         let r = remaster_model_map();
         assert_eq!(r.len(), RemasterModel::value_variants().len());
         assert_eq!(r["v5.5"], "chirp-flounder");
+        assert_eq!(m["v6"], "chirp-hawk");
+        assert_eq!(m["v6-wild"], "chirp-hawk-wild");
+        assert_eq!(m["v6-mini"], "chirp-goose");
+        assert_eq!(r["v6"], "chirp-halibut");
     }
 }

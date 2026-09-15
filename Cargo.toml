@@ -1,11 +1,11 @@
 [package]
 name = "suno"
-version = "0.9.0"
+version = "0.10.0"
 edition = "2024"
-description = "Generate AI music from your terminal — Suno v5.5 with tags, exclude, vocal control, and all generation features"
+description = "Generate AI music from your terminal — Suno v6 with tags, exclude, vocal control, duration, variety, and remaster"
 license = "MIT"
-repository = "https://github.com/paperfoot/suno-cli"
-homepage = "https://github.com/paperfoot/suno-cli"
+repository = "https://github.com/StevenBuglione/suno-cli"
+homepage = "https://github.com/StevenBuglione/suno-cli"
 readme = "README.md"
 keywords = ["suno", "music", "ai", "cli", "audio"]
 categories = ["command-line-utilities", "multimedia::audio"]

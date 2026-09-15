@@ -11,7 +11,7 @@ Which creation command:
 Tips:
   • First run: `suno auth --login`, then `suno doctor` to verify the setup
   • Output is a JSON envelope automatically when piped; force with --json
-  • `suno write` and `suno lyrics` are free; generation costs ~70 credits per call on v5.5
+  • `suno write` and `suno lyrics` are free; generation costs credits (v5.5 ≈70/call; v6 is plan-dependent)
   • Exit codes: 0 ok, 1 transient (retry), 2 config/auth, 3 bad input, 4 rate limited
   • Config: `suno config path` shows the file; SUNO_* env vars override it
   • Full machine-readable manifest: `suno agent-info | jq`
@@ -38,7 +38,7 @@ Examples:
 #[command(
     name = "suno",
     version,
-    about = "Write, generate, and manage Suno music — v5.5 support",
+    about = "Write, generate, and manage Suno music — v6 / v6-wild / v6-mini support",
     after_long_help = HELP_FOOTER
 )]
 pub struct Cli {
@@ -328,13 +328,29 @@ pub struct GenerateArgs {
     #[arg(long)]
     pub lyrics_file: Option<String>,
 
-    /// Model version (default: config `default_model`, v5.5 out of the box)
+    /// Model version (default: config `default_model`, v6 out of the box)
     #[arg(short, long)]
     pub model: Option<ModelVersion>,
 
     /// Vocal gender
     #[arg(long)]
     pub vocal: Option<VocalGender>,
+
+    /// Target duration in seconds (v6 custom: 10–360; omit for Suno's 180s default)
+    #[arg(long)]
+    pub duration: Option<u32>,
+
+    /// Variety / creative range as a whole number 0–4 (v6 Custom)
+    #[arg(long)]
+    pub variety: Option<u8>,
+
+    /// Non-lexical / mumble vocals (v6; session-gated — Suno may ignore it)
+    #[arg(long)]
+    pub mumble: bool,
+
+    /// Max Mode — longer, more ambitious output (v6; account-gated)
+    #[arg(long)]
+    pub max_mode: bool,
 
     /// Weirdness level (0-100)
     #[arg(long)]
@@ -389,13 +405,25 @@ pub struct DescribeArgs {
     #[arg(long)]
     pub tags: Option<String>,
 
-    /// Model version (default: config `default_model`, v5.5 out of the box)
+    /// Model version (default: config `default_model`, v6 out of the box)
     #[arg(short, long)]
     pub model: Option<ModelVersion>,
 
     /// Vocal gender
     #[arg(long)]
     pub vocal: Option<VocalGender>,
+
+    /// Variety / creative range as a whole number 0–4 (v6)
+    #[arg(long)]
+    pub variety: Option<u8>,
+
+    /// Non-lexical / mumble vocals (v6; session-gated — Suno may ignore it)
+    #[arg(long)]
+    pub mumble: bool,
+
+    /// Max Mode — longer, more ambitious output (v6; account-gated)
+    #[arg(long)]
+    pub max_mode: bool,
 
     /// Weirdness level (0-100)
     #[arg(long)]
@@ -458,7 +486,7 @@ pub struct ExtendArgs {
     #[arg(long)]
     pub tags: Option<String>,
 
-    /// Model version (default: config `default_model`, v5.5 out of the box)
+    /// Model version (default: config `default_model`, v6 out of the box)
     #[arg(short, long)]
     pub model: Option<ModelVersion>,
 
@@ -530,8 +558,18 @@ pub struct RemasterArgs {
     pub clip_id: String,
 
     /// Remaster model version
-    #[arg(long, default_value = "v5.5")]
+    #[arg(long, default_value = "v6")]
     pub model: RemasterModel,
+
+    /// Variation strength (subtle | normal | high). Default normal.
+    /// Not sent for v4.5+ (`chirp-bass`).
+    #[arg(long, value_enum)]
+    pub variation: Option<RemasterVariation>,
+
+    /// v6 remaster tonal profile (natural | boost | clarity). Default boost.
+    /// v6 (`chirp-halibut`) only.
+    #[arg(long, value_enum)]
+    pub style_profile: Option<RemasterStyleProfile>,
 
     /// Bypass the duplicate-run guard
     #[arg(long)]
@@ -736,8 +774,17 @@ pub enum ConfigAction {
 
 #[derive(ValueEnum, Clone, Debug, Default)]
 pub enum ModelVersion {
-    #[value(name = "v5.5")]
+    /// Flagship v6 (Pro/Premier). Internal key: chirp-hawk.
+    #[value(name = "v6", alias = "chirp-hawk")]
     #[default]
+    V6,
+    /// Exploratory v6 variant (Pro/Premier). Internal key: chirp-hawk-wild.
+    #[value(name = "v6-wild", alias = "chirp-hawk-wild")]
+    V6Wild,
+    /// Faster compact v6 (all plans). Internal key: chirp-goose.
+    #[value(name = "v6-mini", alias = "chirp-goose")]
+    V6Mini,
+    #[value(name = "v5.5")]
     V55,
     #[value(name = "v5")]
     V5,
@@ -760,6 +807,9 @@ pub enum ModelVersion {
 impl ModelVersion {
     pub fn to_api_key(&self) -> &'static str {
         match self {
+            Self::V6 => "chirp-hawk",
+            Self::V6Wild => "chirp-hawk-wild",
+            Self::V6Mini => "chirp-goose",
             Self::V55 => "chirp-fenix",
             Self::V5 => "chirp-crow",
             Self::V45Plus => "chirp-bluejay",
@@ -774,6 +824,9 @@ impl ModelVersion {
 
     pub fn display_name(&self) -> &'static str {
         match self {
+            Self::V6 => "v6",
+            Self::V6Wild => "v6-wild",
+            Self::V6Mini => "v6-mini",
             Self::V55 => "v5.5",
             Self::V5 => "v5",
             Self::V45Plus => "v4.5+",
@@ -785,6 +838,12 @@ impl ModelVersion {
             Self::V2 => "v2",
         }
     }
+
+    /// v6, v6-wild, and v6-mini share the current v6 generation contract
+    /// (duration, variety, mumble, max mode).
+    pub fn is_v6_family(&self) -> bool {
+        matches!(self, Self::V6 | Self::V6Wild | Self::V6Mini)
+    }
 }
 
 #[derive(ValueEnum, Clone, Debug)]
@@ -795,8 +854,10 @@ pub enum VocalGender {
 
 #[derive(ValueEnum, Clone, Debug, Default)]
 pub enum RemasterModel {
-    #[value(name = "v5.5")]
+    #[value(name = "v6", alias = "chirp-halibut")]
     #[default]
+    V6,
+    #[value(name = "v5.5")]
     V55,
     #[value(name = "v5")]
     V5,
@@ -807,9 +868,64 @@ pub enum RemasterModel {
 impl RemasterModel {
     pub fn to_api_key(&self) -> &'static str {
         match self {
+            Self::V6 => "chirp-halibut",
             Self::V55 => "chirp-flounder",
             Self::V5 => "chirp-carp",
             Self::V45Plus => "chirp-bass",
+        }
+    }
+
+    /// v4.5+ omits `variation_category`; every later remaster model sends it.
+    pub fn supports_variation(&self) -> bool {
+        !matches!(self, Self::V45Plus)
+    }
+
+    /// `style_profile` is a v6 remaster (`chirp-halibut`) field.
+    pub fn supports_style_profile(&self) -> bool {
+        matches!(self, Self::V6)
+    }
+}
+
+/// Remaster variation_category. Web values: subtle, normal (default), high.
+#[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RemasterVariation {
+    #[value(name = "subtle")]
+    Subtle,
+    #[value(name = "normal")]
+    #[default]
+    Normal,
+    #[value(name = "high")]
+    High,
+}
+
+impl RemasterVariation {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Subtle => "subtle",
+            Self::Normal => "normal",
+            Self::High => "high",
+        }
+    }
+}
+
+/// v6 remaster style_profile. Web values: natural, boost (default), clarity.
+#[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RemasterStyleProfile {
+    #[value(name = "natural")]
+    Natural,
+    #[value(name = "boost")]
+    #[default]
+    Boost,
+    #[value(name = "clarity")]
+    Clarity,
+}
+
+impl RemasterStyleProfile {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Natural => "natural",
+            Self::Boost => "boost",
+            Self::Clarity => "clarity",
         }
     }
 }
@@ -824,6 +940,11 @@ mod tests {
         // v4.5-all is the free-tier model missing from the enum until 0.6.0.
         assert_eq!(ModelVersion::V45All.to_api_key(), "chirp-auk-turbo");
         assert_eq!(ModelVersion::V55.to_api_key(), "chirp-fenix");
+        assert_eq!(ModelVersion::V6.to_api_key(), "chirp-hawk");
+        assert_eq!(ModelVersion::V6Wild.to_api_key(), "chirp-hawk-wild");
+        assert_eq!(ModelVersion::V6Mini.to_api_key(), "chirp-goose");
+        assert!(ModelVersion::V6.is_v6_family());
+        assert!(!ModelVersion::V55.is_v6_family());
 
         // Every selectable --model value must have an API key and a display
         // name matching its clap value name (agent-info relies on this).
@@ -839,5 +960,10 @@ mod tests {
         for m in RemasterModel::value_variants() {
             assert!(m.to_api_key().starts_with("chirp"));
         }
+        assert_eq!(RemasterModel::V6.to_api_key(), "chirp-halibut");
+        assert!(RemasterModel::V6.supports_variation());
+        assert!(RemasterModel::V6.supports_style_profile());
+        assert!(!RemasterModel::V45Plus.supports_variation());
+        assert!(!RemasterModel::V55.supports_style_profile());
     }
 }

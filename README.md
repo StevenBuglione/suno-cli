@@ -2,7 +2,7 @@
 
 # suno
 
-**Write and generate AI music from your terminal — full Suno v5.5 support**
+**Write and generate AI music from your terminal — full Suno v6 support**
 
 <br />
 
@@ -22,7 +22,9 @@
 
 ---
 
-A single Rust binary that talks directly to Suno's API. Generate songs with custom lyrics, style tags, your own voice persona, vocal control, weirdness/style sliders, covers, remasters, and every v5.5 feature. Zero-friction auth — one command extracts credentials from your browser automatically.
+A single Rust binary that talks directly to Suno's API. Generate songs with custom lyrics, style tags, your own voice persona, vocal control, duration, variety, weirdness/style sliders, covers, remasters, and every v6 feature. Zero-friction auth — one command extracts credentials from your browser automatically.
+
+This is a fork of [paperfoot/suno-cli](https://github.com/paperfoot/suno-cli) with support for Suno's v6, v6-wild, and v6-mini models.
 
 [Install](#install) | [Quick Start](#quick-start) | [Commands](#commands) | [Features](#features) | [Contributing](#contributing)
 
@@ -105,9 +107,16 @@ suno generate \
 
 # 7. Or skip the composer and let Suno write the lyrics from a description
 suno describe --prompt "a chill lo-fi track about rainy mornings" --wait
+
+# 8. v6 custom with duration, variety, and max mode
+suno generate \
+  --title "Night Drive" \
+  --tags "dream pop, synth, female vocal" \
+  --lyrics-file song.txt \
+  --model v6 --duration 180 --variety 2 --wait --download ./songs/
 ```
 
-Generation costs ~70 credits per call on v5.5 (35 per clip, 2 clips per call — measured live). Older models are cheaper; `suno lyrics` is free. Check `suno models` for what your plan can use.
+Generation costs credits per call (v5.5 was ≈70 — 35 per clip, 2 clips per call). v6 pricing is plan-dependent; `suno lyrics` is free. Check `suno models` and `suno credits` for what your plan can use.
 
 ## Write a song
 
@@ -125,7 +134,7 @@ suno generate --title "..." --tags "..." --lyrics-file song.txt --wait --downloa
 
 Note that shell redirection (`suno write > song.txt`) receives the JSON envelope, not lyrics: output is a JSON envelope whenever stdout is not a terminal. `--out` is the way to get an editable lyrics file.
 
-Fuzzy genre matching covers ~24 subgenres; an unknown genre is passed through verbatim as a style tag, so `write` never fails on input. Piped or with `--json` you get a `{title, mode, genre, style_prompt, structure, suno_tags, structure_tags, bpm, vocal, theme, viral, instrumental, placeholders_remaining, ready_to_generate, missing_requirements, next_action, written}` envelope. `next_action.argv` is the authoritative handoff — run it as argv, never shell-parse `next_action.command`. It is `null` until `--out` names a real file, and the emitted command omits `--model` so your configured default applies (v5.5, Suno's latest, out of the box).
+Fuzzy genre matching covers ~24 subgenres; an unknown genre is passed through verbatim as a style tag, so `write` never fails on input. Piped or with `--json` you get a `{title, mode, genre, style_prompt, structure, suno_tags, structure_tags, bpm, vocal, theme, viral, instrumental, placeholders_remaining, ready_to_generate, missing_requirements, next_action, written}` envelope. `next_action.argv` is the authoritative handoff — run it as argv, never shell-parse `next_action.command`. It is `null` until `--out` names a real file, and the emitted command omits `--model` so your configured default applies (v6, Suno's latest, out of the box).
 
 ### Priming / research songs
 
@@ -261,10 +270,14 @@ Auth methods (in order of convenience):
 | `--tags` | Style direction | `"pop, synths, upbeat"` (1000 chars) |
 | `--exclude` | Styles to avoid | `"metal, heavy, dark"` (1000 chars) |
 | `--lyrics` / `--lyrics-file` | Custom lyrics with `[Verse]` tags | up to 5000 chars |
-| `--prompt` (describe) | Free text description | up to 500 chars |
-| `--model` | Model version | v5.5, v5, v4.5+, v4.5-all, v4.5, v4, v3.5, v3, v2 |
+| `--prompt` (describe) | Free text description | up to 3000 chars on v6 |
+| `--model` | Model version | v6, v6-wild, v6-mini, v5.5, v5, v4.5+, v4.5-all, v4.5, v4, v3.5, v3, v2 |
 | `--vocal` | Vocal gender | male, female |
 | `--persona` | Voice persona ID | UUID from Suno voice creation |
+| `--duration` | Target length (v6 custom) | 10–360 seconds (omit for Suno's 180s default) |
+| `--variety` | Creative range (v6) | 0–4 (whole number) |
+| `--mumble` | Non-lexical vocals (v6) | flag (session-gated) |
+| `--max-mode` | Longer, more ambitious output (v6) | flag (account-gated) |
 | `--weirdness` | How experimental | 0-100 |
 | `--style-influence` | How strictly to follow tags | 0-100 |
 | `--audio-influence` | How strongly source audio shapes the output (generate/cover) | 0-100 |
@@ -302,13 +315,16 @@ Create covers with different styles or remaster clips with newer models:
 
 ```bash
 # Cover with different style tags
-suno cover <clip_id> --tags "jazz, smooth piano" --model v5.5 --wait
+suno cover <clip_id> --tags "jazz, smooth piano" --model v6 --wait
 
 # Remaster an old clip with the latest model
-suno remaster <clip_id> --model v5.5 --wait --download ./remastered/
+suno remaster <clip_id> --model v6 --wait --download ./remastered/
+
+# v6 remaster with explicit variation and tonal profile
+suno remaster <clip_id> --model v6 --variation high --style-profile clarity --wait
 ```
 
-Both route through Suno's unified web generation endpoint (`/api/generate/v2-web/`).
+Cover routes through Suno's unified web generation endpoint (`/api/generate/v2-web/`). Remaster uses the current web remaster route (`POST /api/generate/upsample`).
 
 ### Clip Info
 
@@ -349,15 +365,18 @@ Files use slug format: `title-slug-clipid8.mp3` — no overwrites when Suno gene
 
 | Version | Codename | Default | Notes |
 |---|---|---|---|
-| **v5.5** | chirp-fenix | Yes | Latest, best quality — ≈70 credits per call (35/clip) |
+| **v6** | chirp-hawk | Yes | Flagship v6 (Pro/Premier) — duration, variety, mumble, max mode |
+| v6-wild | chirp-hawk-wild | | Exploratory v6 (Pro/Premier) |
+| v6-mini | chirp-goose | | Faster compact v6 (all plans) |
+| v5.5 | chirp-fenix | | Previous generation — ≈70 credits per call (35/clip) |
 | v5 | chirp-crow | | Previous generation |
 | v4.5+ | chirp-bluejay | | Extended capabilities |
-| v4.5-all | chirp-auk-turbo | | "Best free model" per Suno — cheapest generation |
+| v4.5-all | chirp-auk-turbo | | Cheapest remaining legacy model |
 | v4.5 | chirp-auk | | Stable |
 | v4 | chirp-v4 | | Legacy |
 | v3.5 / v3 / v2 | chirp-v3-5 / chirp-v3-0 / chirp-v2-xxl-alpha | | Early models |
 
-Remaster models: v5.5 = chirp-flounder, v5 = chirp-carp, v4.5+ = chirp-bass.
+Remaster models: v6 = chirp-halibut (default; `--variation` subtle/normal/high, `--style-profile` natural/boost/clarity), v5.5 = chirp-flounder, v5 = chirp-carp, v4.5+ = chirp-bass (no variation).
 
 `suno models` shows what your plan can actually use, live from the API.
 
@@ -367,7 +386,7 @@ Config lives in a TOML file (`suno config path` shows where) and every key is ov
 
 | Key | Env var | Default | What it does |
 |---|---|---|---|
-| `default_model` | `SUNO_DEFAULT_MODEL` | `v5.5` | Default `--model` for generate/describe/extend/cover |
+| `default_model` | `SUNO_DEFAULT_MODEL` | `v6` | Default `--model` for generate/describe/extend/cover |
 | `poll_interval_secs` | `SUNO_POLL_INTERVAL_SECS` | `5` | Initial `--wait` poll backoff (doubles up to 15s) |
 | `poll_timeout_secs` | `SUNO_POLL_TIMEOUT_SECS` | `600` | Total `--wait` timeout |
 | `output_dir` | `SUNO_OUTPUT_DIR` | `.` | Default directory for `download` |
@@ -379,7 +398,7 @@ resolved location.
 
 ```bash
 suno config show                        # effective merged config
-suno config set default_model v5.5      # persist a value (v5.5 is already the default)
+suno config set default_model v6        # persist a value (v6 is already the default)
 suno config check                       # validate the file
 ```
 

@@ -15,7 +15,7 @@ fn show_json(cmd: &mut assert_cmd::Command) -> serde_json::Value {
 fn defaults_apply_in_empty_home() {
     let tmp = tempfile::tempdir().unwrap();
     let json = show_json(&mut suno_in(tmp.path()));
-    assert_eq!(json["data"]["default_model"], "v5.5");
+    assert_eq!(json["data"]["default_model"], "v6");
     assert_eq!(json["data"]["poll_interval_secs"], 5);
     assert_eq!(json["data"]["poll_timeout_secs"], 600);
 }

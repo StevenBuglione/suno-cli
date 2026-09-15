@@ -34,7 +34,7 @@ fn resolve_model(
             <ModelVersion as clap::ValueEnum>::from_str(&cfg.default_model, true).map_err(|_| {
                 CliError::Config(format!(
                     "config default_model '{}' is not a valid --model value — \
-                     fix it with `suno config set default_model v5.5`",
+                     fix it with `suno config set default_model v6`",
                     cfg.default_model
                 ))
             })
@@ -91,16 +91,42 @@ fn build_control_sliders(
     weirdness: Option<f64>,
     style_influence: Option<f64>,
     audio_influence: Option<f64>,
-) -> Option<ControlSliders> {
-    if weirdness.is_none() && style_influence.is_none() && audio_influence.is_none() {
-        return None;
+    variety: Option<u8>,
+) -> Result<Option<ControlSliders>, CliError> {
+    if let Some(v) = variety
+        && v > 4
+    {
+        return Err(CliError::InvalidInput(
+            "--variety must be a whole number from 0 to 4".into(),
+        ));
     }
-    Some(ControlSliders {
+    if weirdness.is_none()
+        && style_influence.is_none()
+        && audio_influence.is_none()
+        && variety.is_none()
+    {
+        return Ok(None);
+    }
+    Ok(Some(ControlSliders {
         // Normalize 0-100 → 0.0-1.0
         weirdness_constraint: weirdness.map(|w| (w / 100.0).clamp(0.0, 1.0)),
         style_weight: style_influence.map(|s| (s / 100.0).clamp(0.0, 1.0)),
         audio_weight: audio_influence.map(|a| (a / 100.0).clamp(0.0, 1.0)),
-    })
+        aug_creativity: variety,
+    }))
+}
+
+/// v6 Custom duration: whole seconds from 10 through 360. The current Web
+/// default of 180s is used when this is omitted, so we don't send a value
+/// unless the caller asked for one.
+fn validate_duration(duration: Option<u32>) -> Result<Option<u32>, CliError> {
+    match duration {
+        None => Ok(None),
+        Some(n) if (10..=360).contains(&n) => Ok(Some(n)),
+        Some(n) => Err(CliError::InvalidInput(format!(
+            "--duration must be a whole number of seconds from 10 to 360, got {n}"
+        ))),
+    }
 }
 
 /// Resolve the captcha token for the five captcha-gated v2-web commands
@@ -476,8 +502,33 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
             };
             reject_unfilled_scaffold(lyrics.as_deref(), args.force)?;
             let tags = build_tags(args.tags.as_deref(), args.vocal.as_ref());
-            let control_sliders =
-                build_control_sliders(args.weirdness, args.style_influence, args.audio_influence);
+            let control_sliders = build_control_sliders(
+                args.weirdness,
+                args.style_influence,
+                args.audio_influence,
+                args.variety,
+            )?;
+            let duration = validate_duration(args.duration)?;
+            if duration.is_some() && !(model.is_v6_family() || matches!(model, ModelVersion::V55)) {
+                return Err(CliError::InvalidInput(
+                    "--duration is supported on v6 (and v5.5) custom generation".into(),
+                ));
+            }
+            if args.variety.is_some() && !model.is_v6_family() {
+                return Err(CliError::InvalidInput(
+                    "--variety is a v6 control (v6, v6-wild, v6-mini)".into(),
+                ));
+            }
+            if args.mumble && !model.is_v6_family() {
+                return Err(CliError::InvalidInput(
+                    "--mumble is a v6 control (v6, v6-wild, v6-mini)".into(),
+                ));
+            }
+            if args.max_mode && !model.is_v6_family() {
+                return Err(CliError::InvalidInput(
+                    "--max-mode is a v6 control (v6, v6-wild, v6-mini)".into(),
+                ));
+            }
 
             // Guard before any credit is spent or Chrome piloted.
             let mut guard = guard::DuplicateGuard::new(&config::data_dir(), "generate");
@@ -495,6 +546,9 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
             req.negative_tags = args.exclude.unwrap_or_default();
             req.make_instrumental = args.instrumental;
             req.persona_id = args.persona.clone();
+            req.duration = duration;
+            req.metadata.is_mumble = args.mumble;
+            req.metadata.is_max_mode = args.max_mode;
             req.metadata.control_sliders = control_sliders;
 
             req.token = resolve_captcha(&c, args.token, args.no_captcha, cli.quiet).await?;
@@ -527,7 +581,23 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
             let cfg = config::AppConfig::load()?;
             let model = resolve_model(args.model, &cfg)?;
             let tags = build_tags(args.tags.as_deref(), args.vocal.as_ref());
-            let control_sliders = build_control_sliders(args.weirdness, args.style_influence, None);
+            let control_sliders =
+                build_control_sliders(args.weirdness, args.style_influence, None, args.variety)?;
+            if args.variety.is_some() && !model.is_v6_family() {
+                return Err(CliError::InvalidInput(
+                    "--variety is a v6 control (v6, v6-wild, v6-mini)".into(),
+                ));
+            }
+            if args.mumble && !model.is_v6_family() {
+                return Err(CliError::InvalidInput(
+                    "--mumble is a v6 control (v6, v6-wild, v6-mini)".into(),
+                ));
+            }
+            if args.max_mode && !model.is_v6_family() {
+                return Err(CliError::InvalidInput(
+                    "--max-mode is a v6 control (v6, v6-wild, v6-mini)".into(),
+                ));
+            }
 
             let mut guard = guard::DuplicateGuard::new(&config::data_dir(), "describe");
             guard.acquire(args.force)?;
@@ -540,6 +610,8 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
             req.tags = tags;
             req.make_instrumental = args.instrumental;
             req.persona_id = args.persona.clone();
+            req.metadata.is_mumble = args.mumble;
+            req.metadata.is_max_mode = args.max_mode;
             req.metadata.control_sliders = control_sliders;
 
             let c = client().await?;
@@ -601,7 +673,7 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
 
             let c = client().await?;
             let token = resolve_captcha(&c, args.token, args.no_captcha, cli.quiet).await?;
-            let control_sliders = build_control_sliders(None, None, args.audio_influence);
+            let control_sliders = build_control_sliders(None, None, args.audio_influence, None)?;
 
             if !cli.quiet {
                 eprintln!("Creating cover ({})...", model.display_name());
@@ -631,15 +703,33 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
             let cfg = config::AppConfig::load()?;
             let mut guard = guard::DuplicateGuard::new(&config::data_dir(), "remaster");
             guard.acquire(args.force)?;
+            if args.variation.is_some() && !args.model.supports_variation() {
+                return Err(CliError::InvalidInput(
+                    "--variation is not supported by the v4.5+ remaster model".into(),
+                ));
+            }
+            if args.style_profile.is_some() && !args.model.supports_style_profile() {
+                return Err(CliError::InvalidInput(
+                    "--style-profile is supported only by the v6 remaster model".into(),
+                ));
+            }
 
             let c = client().await?;
-            let token = resolve_captcha(&c, args.token, args.no_captcha, cli.quiet).await?;
+            // Upsample does not take a captcha token; still honor --no-captcha
+            // by skipping the solver, and run preflight otherwise so a gated
+            // account surfaces the same Chrome path as generate.
+            let _token = resolve_captcha(&c, args.token, args.no_captcha, cli.quiet).await?;
 
             if !cli.quiet {
                 eprintln!("Remastering with {}...", args.model.to_api_key());
             }
             let clips = c
-                .remaster(&args.clip_id, args.model.to_api_key(), token)
+                .remaster(
+                    &args.clip_id,
+                    args.model.to_api_key(),
+                    args.variation.map(|v| v.as_str()),
+                    args.style_profile.map(|s| s.as_str()),
+                )
                 .await?;
             handle_generation(
                 &c,
@@ -1048,19 +1138,43 @@ mod tests {
 
     #[test]
     fn control_sliders_normalize_and_clamp() {
-        let s = build_control_sliders(Some(50.0), Some(150.0), Some(0.0)).unwrap();
+        let s = build_control_sliders(Some(50.0), Some(150.0), Some(0.0), None)
+            .unwrap()
+            .unwrap();
         assert_eq!(s.weirdness_constraint, Some(0.5));
         // Out-of-range input clamps rather than sending >1.0 to the API.
         assert_eq!(s.style_weight, Some(1.0));
         assert_eq!(s.audio_weight, Some(0.0));
 
         // No flags → no block at all, so the request stays clean.
-        assert!(build_control_sliders(None, None, None).is_none());
+        assert!(
+            build_control_sliders(None, None, None, None)
+                .unwrap()
+                .is_none()
+        );
 
         // A lone --audio-influence still produces a block.
-        let s = build_control_sliders(None, None, Some(65.0)).unwrap();
+        let s = build_control_sliders(None, None, Some(65.0), None)
+            .unwrap()
+            .unwrap();
         assert_eq!(s.audio_weight, Some(0.65));
         assert_eq!(s.weirdness_constraint, None);
+
+        // Variety is a whole number 0–4, not a 0–100 slider.
+        let s = build_control_sliders(None, None, None, Some(3))
+            .unwrap()
+            .unwrap();
+        assert_eq!(s.aug_creativity, Some(3));
+        assert!(build_control_sliders(None, None, None, Some(5)).is_err());
+    }
+
+    #[test]
+    fn duration_accepts_v6_custom_range() {
+        assert_eq!(validate_duration(None).unwrap(), None);
+        assert_eq!(validate_duration(Some(10)).unwrap(), Some(10));
+        assert_eq!(validate_duration(Some(360)).unwrap(), Some(360));
+        assert!(validate_duration(Some(9)).is_err());
+        assert!(validate_duration(Some(361)).is_err());
     }
 
     #[test]

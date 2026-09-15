@@ -777,7 +777,9 @@ suno generate \
 | `--exclude <str>` | Styles/traits to keep out |
 | `--lyrics <str>` | Inline lyric block |
 | `--lyrics-file <path>` | Lyric block from a file (preferred for long, formatted lyrics) |
-| `--model <v5.5\|v5\|v4.5+\|v4.5\|v4.5-all\|v4>` | Model version |
+| `--model <v6\|v6-wild\|v6-mini\|v5.5\|v5\|v4.5+\|v4.5\|v4.5-all\|v4>` | Model version |
+| `--duration <10-360>` | Target length in seconds (v6 custom) |
+| `--variety <0-4>` | Creative range (v6 Custom, whole number) |
 | `--vocal <male\|female>` | Vocal gender |
 | `--weirdness <0-100>` | Experimental/novelty dial |
 | `--style-influence <0-100>` | How hard the style tags push |
@@ -790,4 +792,4 @@ suno generate \
 | `--no-captcha` | Skip the captcha flow |
 | `--force` | Bypass the duplicate-run guard and the unresolved-placeholder preflight |
 
-**Cost:** `v5.5` ≈ 70 credits/call; `v4.5-all` ≈ 10 credits — the cheapest for iterating on drafts. `suno lyrics` is free (text only, no audio). Draft on `v4.5-all`, then re-run the winning lyric on a higher model if the fidelity matters for the listener test.
+**Cost:** v6 is plan-dependent; `v5.5` ≈ 70 credits/call; `v4.5-all` ≈ 10 credits — the cheapest remaining legacy model for iterating on drafts. `suno lyrics` is free (text only, no audio). Draft on `v4.5-all`, then re-run the winning lyric on v6 if the fidelity matters for the listener test.

@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.10.0 — Suno v6
+
+Fork of paperfoot/suno-cli with support for Suno's v6 model family (launched 2026-09-09).
+
+**Added:**
+
+- Generation models `v6` (`chirp-hawk`, new default), `v6-wild` (`chirp-hawk-wild`), `v6-mini` (`chirp-goose`). API-key aliases (`chirp-hawk`, etc.) are accepted on `--model`.
+- Remaster model `v6` (`chirp-halibut`, new remaster default). Remaster now posts to the current web route `POST /api/generate/upsample` instead of the guessed v2-web `create_mode: remaster` payload.
+- `--variation subtle|normal|high` on remaster (default `normal`; rejected for v4.5+ / `chirp-bass`).
+- `--style-profile natural|boost|clarity` on remaster (v6 only; default `boost`).
+- `--duration 10..360` on `generate` for v6 Custom (omit to use Suno's 180s default).
+- `--variety 0..4` (whole-number `metadata.control_sliders.aug_creativity`), `--mumble`, and `--max-mode` on `generate` / `describe`.
+
+**Changed:**
+
+- Compiled default `default_model` is `v6`. Existing `SUNO_DEFAULT_MODEL` / config-file values still win.
+- Describe prompt limit documented as 3000 chars (v6 `gpt_description_prompt` max).
+
 ## v0.8.0 — the composer and the renderer agree about the artifact
 
 One invariant now holds end to end: the file named by the emitted generate command exists, is directly consumable by `--lyrics-file`, contains no unresolved instructions, and reflects every selected control.

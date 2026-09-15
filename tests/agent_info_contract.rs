@@ -91,6 +91,25 @@ fn models_map_includes_v4_5_all() {
 }
 
 #[test]
+fn models_map_includes_v6_family() {
+    let info = agent_info();
+    assert_eq!(info["models"]["v6"], "chirp-hawk");
+    assert_eq!(info["models"]["v6-wild"], "chirp-hawk-wild");
+    assert_eq!(info["models"]["v6-mini"], "chirp-goose");
+    assert_eq!(info["remaster_models"]["v6"], "chirp-halibut");
+    assert_eq!(info["default_model"], "chirp-hawk (v6)");
+
+    let out = suno().args(["generate", "--help"]).output().unwrap();
+    let help = String::from_utf8_lossy(&out.stdout);
+    assert!(help.contains("v6-wild"), "--model must accept v6-wild");
+    assert!(help.contains("v6-mini"), "--model must accept v6-mini");
+    assert!(help.contains("--duration"), "v6 custom duration flag");
+    assert!(help.contains("--variety"), "v6 variety flag");
+    assert!(help.contains("--mumble"), "v6 mumble flag");
+    assert!(help.contains("--max-mode"), "v6 max-mode flag");
+}
+
+#[test]
 fn models_map_matches_model_flag_values() {
     // Every model in the manifest must be selectable via --model, and the
     // dead --variation flag must stay dead.

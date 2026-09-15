@@ -187,6 +187,11 @@ pub struct GenerateRequest {
     pub mv: String,
     pub prompt: String,
     pub make_instrumental: bool,
+    /// Target length in seconds. Current Web sends this for v6 Custom
+    /// (10–360, default 180 when omitted). Skip when unset so older models
+    /// keep their previous payload shape.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration: Option<u32>,
     pub user_uploaded_images_b64: Option<String>,
     pub metadata: GenerateMetadata,
     /// Always present, empty array unless overriding model fields.
@@ -219,6 +224,7 @@ impl GenerateRequest {
             mv: mv.to_string(),
             prompt: String::new(),
             make_instrumental: false,
+            duration: None,
             user_uploaded_images_b64: None,
             metadata: GenerateMetadata::new(create_mode),
             override_fields: Vec::new(),
@@ -285,6 +291,10 @@ pub struct ControlSliders {
     /// source audio shapes covers/remixes. Field name confirmed in the wild.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub audio_weight: Option<f64>,
+    /// Variety slider. Whole number 0–4. Live v6 submissions 2026-09-11
+    /// preserved integers and rejected fractions with HTTP 400.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aug_creativity: Option<u8>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -374,6 +384,23 @@ pub struct ConcatRequest {
     pub clip_id: String,
 }
 
+// --- Remaster (POST /api/generate/upsample) ---
+//
+// Current web remaster route, recaptured 2026-09-11. v6 `chirp-halibut`
+// sends both `variation_category` (subtle|normal|high, default normal) and
+// `style_profile` (natural|boost|clarity, default boost). v5.5/v5 send
+// variation only; v4.5+ (`chirp-bass`) omits both.
+
+#[derive(Debug, Serialize)]
+pub struct RemasterRequest {
+    pub clip_id: String,
+    pub model_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub variation_category: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub style_profile: Option<String>,
+}
+
 // --- Persona ---
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -460,10 +487,62 @@ mod tests {
             weirdness_constraint: None,
             style_weight: None,
             audio_weight: Some(0.65),
+            aug_creativity: None,
         };
         let v = serde_json::to_value(&s).unwrap();
         assert_eq!(v["audio_weight"], 0.65);
         assert!(v.get("weirdness_constraint").is_none());
+        assert!(v.get("aug_creativity").is_none());
+    }
+
+    #[test]
+    fn generate_request_omits_duration_unless_set() {
+        let mut req = GenerateRequest::new("chirp-hawk", "custom");
+        let v = serde_json::to_value(&req).unwrap();
+        assert!(v.get("duration").is_none());
+
+        req.duration = Some(180);
+        let v = serde_json::to_value(&req).unwrap();
+        assert_eq!(v["duration"], 180);
+        assert_eq!(v["mv"], "chirp-hawk");
+    }
+
+    #[test]
+    fn control_sliders_serialize_variety_as_whole_number() {
+        let s = ControlSliders {
+            weirdness_constraint: None,
+            style_weight: None,
+            audio_weight: None,
+            aug_creativity: Some(3),
+        };
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["aug_creativity"], 3);
+        assert!(v["aug_creativity"].is_u64() || v["aug_creativity"].is_i64());
+    }
+
+    #[test]
+    fn remaster_request_omits_optional_fields() {
+        let req = RemasterRequest {
+            clip_id: "abc".into(),
+            model_name: "chirp-bass".into(),
+            variation_category: None,
+            style_profile: None,
+        };
+        let v = serde_json::to_value(&req).unwrap();
+        assert_eq!(v["clip_id"], "abc");
+        assert_eq!(v["model_name"], "chirp-bass");
+        assert!(v.get("variation_category").is_none());
+        assert!(v.get("style_profile").is_none());
+
+        let req = RemasterRequest {
+            clip_id: "abc".into(),
+            model_name: "chirp-halibut".into(),
+            variation_category: Some("high".into()),
+            style_profile: Some("clarity".into()),
+        };
+        let v = serde_json::to_value(&req).unwrap();
+        assert_eq!(v["variation_category"], "high");
+        assert_eq!(v["style_profile"], "clarity");
     }
 
     #[test]

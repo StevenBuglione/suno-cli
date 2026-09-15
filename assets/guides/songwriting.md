@@ -556,8 +556,12 @@ Use `--model v4.5-all` for cheap drafts (~10 credits/call — the cheapest model
 --exclude <str>            Styles to steer away from
 --lyrics <str>             Inline lyrics
 --lyrics-file <path>       Lyrics from a file (conflicts with --lyrics)
---model <ver>             v5.5 | v5 | v4.5+ | v4.5 | v4.5-all | v4
+--model <ver>             v6 | v6-wild | v6-mini | v5.5 | v5 | v4.5+ | v4.5 | v4.5-all | v4
 --vocal <male|female>      Vocal gender
+--duration <10-360>        Target length in seconds (v6 custom; omit for 180s)
+--variety <0-4>            Creative range (v6 Custom, whole number)
+--mumble                   Non-lexical vocals (v6; session-gated)
+--max-mode                 Longer output (v6; account-gated)
 --weirdness <0-100>        Experimentation / deviation
 --style-influence <0-100>  How hard the tags steer the result
 --audio-influence <0-100>  Weight of a reference audio input
@@ -570,7 +574,7 @@ Use `--model v4.5-all` for cheap drafts (~10 credits/call — the cheapest model
 --force                    Bypass the duplicate-run guard and the placeholder preflight
 ```
 
-**Cost**: v5.5 ≈ 70 credits/call; v4.5-all ≈ 10 credits/call (cheapest — use it for drafts). Downloading embeds the lyrics into the MP3.
+**Cost**: v6 is plan-dependent (`suno credits`); v5.5 ≈ 70 credits/call; v4.5-all ≈ 10 credits/call (cheapest remaining legacy draft model). Downloading embeds the lyrics into the MP3.
 
 ### Quick alternatives
 

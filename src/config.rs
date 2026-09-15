@@ -22,7 +22,7 @@ fn env_dir(key: &str) -> Option<PathBuf> {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AppConfig {
     /// Default --model for generate/describe/extend/cover (clap name,
-    /// e.g. "v5.5" — not the chirp-* API key).
+    /// e.g. "v6" — not the chirp-* API key).
     pub default_model: String,
     /// Initial poll backoff for --wait (doubles up to 15s).
     pub poll_interval_secs: u64,
@@ -35,7 +35,7 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            default_model: "v5.5".into(),
+            default_model: "v6".into(),
             poll_interval_secs: 5,
             poll_timeout_secs: 600,
             output_dir: ".".into(),

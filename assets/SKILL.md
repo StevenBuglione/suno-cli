@@ -19,7 +19,7 @@ One binary does the whole job — composing the song and rendering the audio. Al
    ```bash
    suno generate --title "..." --tags "<style_prompt>" --lyrics-file song.txt --wait --download ./songs/
    ```
-   `generate` exits 3 if any `<...>` placeholder survives, so an unfilled scaffold can never burn credits. It renders on the configured default model — v5.5, Suno's latest (~70 credits) — unless you pass `--model`.
+   `generate` exits 3 if any `<...>` placeholder survives, so an unfilled scaffold can never burn credits. It renders on the configured default model — v6, Suno's latest — unless you pass `--model`. Use `--model v6-wild` or `--model v6-mini` for the other v6 variants; `--duration`, `--variety`, `--mumble`, and `--max-mode` are v6 Custom controls.
 
 ## Priming / research songs
 
@@ -36,4 +36,4 @@ Adds a chill-lounge low-arousal scaffold plus a Prime-Stack Map and research-art
 - `suno --help` / `suno <command> --help` — usage, tips, real examples
 - First run: `suno auth --login`, then `suno doctor` to verify
 
-Piped output is a JSON envelope automatically — `suno write > song.txt` gets JSON, not lyrics; use `--out`. `suno write` and `suno lyrics` are free; generation ≈70 credits/call on v5.5.
+Piped output is a JSON envelope automatically — `suno write > song.txt` gets JSON, not lyrics; use `--out`. `suno write` and `suno lyrics` are free; generation costs credits (v5.5 ≈70/call; v6 is plan-dependent).
