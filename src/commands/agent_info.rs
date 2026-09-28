@@ -827,7 +827,7 @@ fn base_manifest(commands: Map<String, Value>, global_flags: Map<String, Value>)
             "4": "Rate limited — wait 30-60s and retry",
         },
         "breaking_changes": {
-            "0.10.0": "Failures use one stderr envelope, with recoverable results in error.details. --force only bypasses locking; use --allow-placeholders to send literal lyric markers.",
+            "0.10.1": "Failures use one stderr envelope, with recoverable results in error.details. --force only bypasses locking; use --allow-placeholders to send literal lyric markers.",
             "0.6.0": "Exit codes remapped to the framework contract: auth errors 3→2, not-found 5→3, code 5 removed. `list --json` data is now {clips, next_cursor, has_more}; `list --page` → `--cursor`; `generate --variation` removed."
         },
         "envelope": {

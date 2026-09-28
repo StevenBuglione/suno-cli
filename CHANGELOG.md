@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.10.0 — v6 catalogue, resumable jobs, and signed downloads
+## v0.10.1 — v6 catalogue, resumable jobs, and signed downloads
 
 - Added Turnstile provider detection, numeric `--token-provider`, and the website's hCaptcha fallback. Captcha calls have absolute deadlines; `--quiet` keeps failures machine-readable.
 - Release builds now run checks before packaging; crates.io publication failures are surfaced.
@@ -60,7 +60,7 @@ One invariant now holds end to end: the file named by the emitted generate comma
 - `--instrumental` is coherent: no `<...>` fill instructions, `--instrumental` in the emitted command, no vocal-only tags.
 - Titles and paths in the emitted command are shell-escaped (`She Said "Go"` produced invalid shell).
 - `generate` refuses lyrics containing unresolved `<...>` scaffold placeholders (exit 3, naming the line numbers) so an unfilled draft cannot spend generation credits. `--force` overrides.
-- The emitted command stopped pinning `--model v4.5-all` and instead used the configured default. At the time of this v0.8.0 release, that default was v5.5; v0.10.0 later moved it to v6.
+- The emitted command stopped pinning `--model v4.5-all` and instead used the configured default. At the time of this v0.8.0 release, that default was v5.5; v0.10.1 later moved it to v6.
 - New fields: `placeholders_remaining`, `ready_to_generate`, `missing_requirements`, `project_written`.
 
 **Discovery:**

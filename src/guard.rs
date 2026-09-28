@@ -98,10 +98,20 @@ mod tests {
 
     #[test]
     fn rejected_and_forced_guards_cannot_release_owner() {
+        // Windows locks also exclude reads through separately opened handles.
+        // Read diagnostic metadata through the handle that owns the lock.
+        fn snapshot(guard: &mut DuplicateGuard) -> Vec<u8> {
+            use std::io::Read;
+            let file = guard.file.as_mut().unwrap();
+            file.seek(SeekFrom::Start(0)).unwrap();
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes).unwrap();
+            bytes
+        }
         let tmp = tempfile::tempdir().unwrap();
         let mut owner = DuplicateGuard::new(tmp.path(), "op");
         owner.acquire(false).unwrap();
-        let metadata = std::fs::read(&owner.lock_path).unwrap();
+        let metadata = snapshot(&mut owner);
 
         {
             let mut rejected = DuplicateGuard::new(tmp.path(), "op");
@@ -115,7 +125,7 @@ mod tests {
             forced.release();
         }
 
-        assert_eq!(std::fs::read(&owner.lock_path).unwrap(), metadata);
+        assert_eq!(snapshot(&mut owner), metadata);
         let mut contender = DuplicateGuard::new(tmp.path(), "op");
         assert_eq!(contender.acquire(false).unwrap_err().exit_code(), 3);
     }
