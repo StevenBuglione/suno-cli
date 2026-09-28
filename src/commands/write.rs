@@ -1209,7 +1209,7 @@ pub fn run(args: WriteArgs, fmt: OutputFormat, quiet: bool) -> Result<(), CliErr
                 written: args.out.clone(),
                 project_written: args.project_out.clone(),
             };
-            crate::output::json::success(&envelope);
+            crate::output::json::success(&envelope)?;
         }
         OutputFormat::Table => {
             if args.out.is_none() && args.project_out.is_none() {
@@ -1241,7 +1241,7 @@ pub fn run(args: WriteArgs, fmt: OutputFormat, quiet: bool) -> Result<(), CliErr
                         }
                         eprintln!("  {cmd}");
                         eprintln!(
-                            "(renders on the configured default model — v5.5, Suno's latest, unless you override --model)"
+                            "(renders on the configured default model — v6, unless you override --model)"
                         );
                     }
                     None => eprintln!(

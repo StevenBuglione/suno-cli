@@ -15,6 +15,7 @@ use api::SunoClient;
 use api::types::{ControlSliders, GenerateRequest, SetMetadataRequest};
 use auth::AuthState;
 use cli::*;
+use commands::generation::{generation_recovery, handle_generation, preview_request};
 use errors::CliError;
 use output::OutputFormat;
 
@@ -34,7 +35,7 @@ fn resolve_model(
             <ModelVersion as clap::ValueEnum>::from_str(&cfg.default_model, true).map_err(|_| {
                 CliError::Config(format!(
                     "config default_model '{}' is not a valid --model value — \
-                     fix it with `suno config set default_model v5.5`",
+                     fix it with `suno config set default_model v6`",
                     cfg.default_model
                 ))
             })
@@ -53,16 +54,19 @@ fn read_input_file(path: &str) -> Result<String, CliError> {
 /// Credit protection shared by every command that sends lyrics into the
 /// v2-web `prompt` field (generate, extend): an unfilled `suno write`
 /// scaffold would be sung verbatim at real credit cost. Refuse it unless
-/// forced.
-fn reject_unfilled_scaffold(lyrics: Option<&str>, force: bool) -> Result<(), CliError> {
+/// --allow-placeholders is supplied.
+fn reject_unfilled_scaffold(
+    lyrics: Option<&str>,
+    allow_placeholders: bool,
+) -> Result<(), CliError> {
     let Some(text) = lyrics else { return Ok(()) };
     let lines = commands::write::placeholder_lines(text);
-    if lines.is_empty() || force {
+    if lines.is_empty() || allow_placeholders {
         return Ok(());
     }
     let numbers: Vec<String> = lines.iter().map(|n| n.to_string()).collect();
     Err(CliError::InvalidInput(format!(
-        "lyrics contain {} unresolved scaffold placeholder(s) at line(s) {} — fill the <...> spans before generating (or pass --force to send them as written)",
+        "lyrics contain {} unresolved scaffold placeholder(s) at line(s) {} — fill the <...> spans before generating (or pass --allow-placeholders to send them as written)",
         lines.len(),
         numbers.join(", ")
     )))
@@ -114,164 +118,73 @@ fn build_control_sliders(
 async fn resolve_captcha(
     c: &SunoClient,
     token: Option<String>,
+    provider: Option<u8>,
     no_captcha: bool,
+    headless: bool,
+    no_browser: bool,
     quiet: bool,
-) -> Result<Option<String>, CliError> {
-    if let Some(t) = token {
-        return Ok(Some(t));
+) -> Result<(Option<String>, Option<u8>), CliError> {
+    if token.is_some() && provider.is_some() {
+        return Ok((token, provider));
     }
-    if no_captcha {
-        return Ok(None);
+    if no_captcha && token.is_none() {
+        return Ok((None, None));
     }
-
-    // Test hook: SUNO_FORCE_CAPTCHA=1 skips the preflight and always runs the
-    // solver so the browser path is exercisable on accounts that return
-    // required=false. Attaching an unrequested token is harmless.
+    let check = c.captcha_check("generation").await?;
+    let provider = match provider {
+        Some(p) => p,
+        None => u8::try_from(check.captcha_version.unwrap_or(1)).map_err(|_| {
+            CliError::Config("unknown Suno captcha provider; update the CLI".into())
+        })?,
+    };
+    if !matches!(provider, 1 | 2) {
+        return Err(CliError::Config(format!(
+            "unknown Suno captcha provider {provider}; update the CLI"
+        )));
+    }
+    if token.is_some() {
+        return Ok((token, Some(provider)));
+    }
     let forced = std::env::var("SUNO_FORCE_CAPTCHA").is_ok_and(|v| v == "1");
-    let check = if forced {
-        None
-    } else {
-        Some(c.captcha_check("generation").await)
-    };
-    let required = match &check {
-        Some(Ok(resp)) => resp.required,
-        Some(Err(_)) => true,
-        None => true,
-    };
-    if !required {
-        if !quiet {
-            eprintln!("Captcha not required — skipping solver");
-        }
-        return Ok(None);
+    if !check.required && !forced {
+        return Ok((None, None));
     }
-
+    if no_browser {
+        return Err(CliError::Api {
+            code: "captcha_required",
+            message: format!(
+                "Suno requires captcha provider {provider}; supply --token and --token-provider {provider}, or omit --no-browser"
+            ),
+        });
+    }
     if !quiet {
-        if forced {
-            eprintln!("SUNO_FORCE_CAPTCHA=1 — solving hCaptcha via piloted Chrome...");
-        } else {
-            match check.and_then(|r| r.ok()).and_then(|r| r.captcha_version) {
-                Some(v) => {
-                    eprintln!("Captcha required (version {v}) — solving via piloted Chrome...")
-                }
-                None => eprintln!("Solving hCaptcha via piloted Chrome..."),
-            }
-        }
+        eprintln!("Solving Suno captcha (provider {provider})...");
     }
-    let auth = AuthState::load()?;
-    let solved = captcha::solve(&auth).await.map_err(|e| match e {
-        // A Config error (no Chrome installed, non-loopback CDP endpoint) is a
-        // setup problem the user must fix — surface it verbatim as exit 2, not
-        // a retryable GenerationFailed. Only genuine solve failures get the
-        // "clear the challenge in the UI" retry guidance.
-        CliError::Config(_) => e,
-        other => CliError::GenerationFailed(format!(
-            "captcha solve failed: {other} — Suno is enforcing a captcha on this account; \
-             generate one song in the suno.com UI to clear the challenge, then retry"
-        )),
-    })?;
-    if forced && !quiet {
-        eprintln!(
-            "Solved token: {} chars, prefix {}",
-            solved.len(),
-            &solved[..solved.len().min(24)]
-        );
-    }
-    Ok(Some(solved))
-}
-
-/// Generate, wait, optionally download with lyrics embedding.
-/// Poll timing comes from config (`poll_timeout_secs`, `poll_interval_secs`).
-async fn handle_generation(
-    c: &SunoClient,
-    clips: Vec<api::types::Clip>,
-    wait: bool,
-    download_dir: Option<&str>,
-    fmt: OutputFormat,
-    quiet: bool,
-    cfg: &config::AppConfig,
-) -> Result<(), CliError> {
-    let ids: Vec<String> = clips.iter().map(|c| c.id.clone()).collect();
-
-    if wait && !ids.is_empty() {
-        if !quiet {
-            eprintln!("Waiting for generation to complete...");
-        }
-        let final_clips = c
-            .poll_clips(&ids, cfg.poll_timeout_secs, cfg.poll_interval_secs)
-            .await?;
-
-        if let Some(dir) = download_dir {
-            for clip in &final_clips {
-                if clip.status == "complete" {
-                    let path = download::download_clip(clip, dir, false).await?;
-
-                    // Embed lyrics into MP3
-                    let plain_lyrics = clip.metadata.prompt.as_deref();
-                    // Try to get timed lyrics for synced display
-                    let aligned = c.aligned_lyrics(&clip.id).await.ok();
-                    download::embed_lyrics_in_mp3(
-                        &path,
-                        &clip.title,
-                        plain_lyrics,
-                        aligned.as_deref(),
-                    )?;
-
-                    if !quiet {
-                        eprintln!("Downloaded: {path} (lyrics embedded)");
-                    }
-                }
-            }
-        }
-
-        // A clip that polled to "error" is a failed generation — exit
-        // non-zero so agents don't treat moderation rejections and internal
-        // failures as success. Completed siblings were already downloaded.
-        let failed: Vec<String> = final_clips
-            .iter()
-            .filter(|c| c.status == "error")
-            .map(|c| {
-                let reason = c
-                    .metadata
-                    .error_message
-                    .as_deref()
-                    .or(c.metadata.error_type.as_deref())
-                    .unwrap_or("unknown error");
-                format!("{} ({reason})", c.id)
-            })
-            .collect();
-        if !failed.is_empty() {
-            return Err(CliError::GenerationFailed(format!(
-                "clip(s) errored: {}",
-                failed.join("; ")
-            )));
-        }
-
-        match fmt {
-            OutputFormat::Json => output::json::success(&final_clips),
-            OutputFormat::Table => output::table::clips(&final_clips),
-        }
-    } else {
-        match fmt {
-            OutputFormat::Json => output::json::success(&clips),
-            OutputFormat::Table => {
-                output::table::clips(&clips);
-                if !ids.is_empty() {
-                    eprintln!("\nUse `suno status {}` to check progress", ids.join(" "));
-                }
-            }
-        }
-    }
-    Ok(())
+    let (solved, actual_provider) =
+        captcha::solve(&AuthState::load()?, headless, provider, quiet).await?;
+    Ok((Some(solved), Some(actual_provider)))
 }
 
 async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
     match cli.command {
-        Commands::Auth(args) => {
+        Commands::Auth(mut args) => {
+            if args.cookie_stdin {
+                args.cookie = Some(commands::auth_input::read_secret()?);
+            }
+            if args.jwt_stdin {
+                args.jwt = Some(commands::auth_input::read_secret()?);
+            }
+            if cli.no_browser && args.login {
+                return Err(CliError::Config(
+                    "headless authentication uses --cookie-stdin, --jwt-stdin, or a stored session"
+                        .into(),
+                ));
+            }
             if args.logout {
                 AuthState::delete()?;
                 match fmt {
                     OutputFormat::Json => {
-                        output::json::success(serde_json::json!({ "authenticated": false }))
+                        output::json::success(serde_json::json!({ "authenticated": false }))?
                     }
                     OutputFormat::Table => {
                         eprintln!("Logged out; removed stored Suno authentication")
@@ -293,6 +206,9 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
                     && state.jwt.is_none()
                     && state.clerk_client_cookie.is_none());
 
+            if cli.no_browser && should_login {
+                return Err(CliError::AuthMissing);
+            }
             if args.refresh {
                 // Force-refresh the JWT via the stored Clerk session cookie.
                 // Useful when the API rejects the current JWT mid-session
@@ -302,8 +218,10 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
                         "no Clerk session cookie stored — run `suno auth --login` first".into(),
                     )
                 })?;
-                let http = reqwest::Client::new();
-                eprintln!("Refreshing JWT via Clerk session cookie...");
+                let http = auth::http_client()?;
+                if !cli.quiet && !matches!(fmt, OutputFormat::Json) {
+                    eprintln!("Refreshing JWT via Clerk session cookie...");
+                }
                 let (session_id, jwt) = if let Some(session_id) = state.session_id.clone() {
                     (
                         session_id.clone(),
@@ -315,14 +233,20 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
                 state.session_id = Some(session_id);
                 state.jwt = Some(jwt);
                 state.save()?;
-                eprintln!("JWT refreshed successfully");
+                if !cli.quiet && !matches!(fmt, OutputFormat::Json) {
+                    eprintln!("JWT refreshed successfully");
+                }
             } else if should_login {
                 // Automatic: extract cookies from browser
-                eprintln!("Extracting Suno session from your browser...");
+                if !cli.quiet && !matches!(fmt, OutputFormat::Json) {
+                    eprintln!("Extracting Suno session from your browser...");
+                }
                 let browser_auth = auth::extract_browser_auth()?;
 
-                let http = reqwest::Client::new();
-                eprintln!("Exchanging for access token via Clerk...");
+                let http = auth::http_client()?;
+                if !cli.quiet && !matches!(fmt, OutputFormat::Json) {
+                    eprintln!("Exchanging for access token via Clerk...");
+                }
                 let (session_id, jwt) =
                     auth::clerk_token_exchange(&http, &browser_auth.clerk_client_cookie).await?;
 
@@ -337,8 +261,10 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
             } else if let Some(cookie) = args.cookie.as_deref() {
                 // Manual: user provides a full Cookie header or raw Clerk __client value.
                 let browser_auth = auth::normalize_cookie_input(cookie)?;
-                let http = reqwest::Client::new();
-                eprintln!("Exchanging cookie for access token...");
+                let http = auth::http_client()?;
+                if !cli.quiet && !matches!(fmt, OutputFormat::Json) {
+                    eprintln!("Exchanging cookie for access token...");
+                }
                 let (session_id, jwt) =
                     auth::clerk_token_exchange(&http, &browser_auth.clerk_client_cookie).await?;
 
@@ -357,7 +283,9 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
                     state.device_id = Some(uuid::Uuid::new_v4().to_string());
                 }
             } else {
-                eprintln!("Checking existing authentication...");
+                if !cli.quiet && !matches!(fmt, OutputFormat::Json) {
+                    eprintln!("Checking existing authentication...");
+                }
             }
 
             if let Some(device) = args.device.as_ref() {
@@ -380,7 +308,7 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
                     "authenticated": true,
                     "plan": info.plan.name,
                     "credits": info.total_credits_left,
-                })),
+                }))?,
                 OutputFormat::Table => eprintln!(
                     "Authenticated! Plan: {}, Credits: {}",
                     info.plan.name, info.total_credits_left
@@ -391,7 +319,7 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
         Commands::Credits => {
             let info = client().await?.billing_info().await?;
             match fmt {
-                OutputFormat::Json => output::json::success(&info),
+                OutputFormat::Json => output::json::success(&info)?,
                 OutputFormat::Table => output::table::billing(&info),
             }
         }
@@ -399,7 +327,7 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
         Commands::Models => {
             let info = client().await?.billing_info().await?;
             match fmt {
-                OutputFormat::Json => output::json::success(&info.models),
+                OutputFormat::Json => output::json::success(&info.models)?,
                 OutputFormat::Table => output::table::models(&info.models),
             }
         }
@@ -422,7 +350,7 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
                             "next_cursor": feed.next_cursor,
                             "has_more": feed.has_more,
                         }),
-                    );
+                    )?;
                 }
                 OutputFormat::Table => {
                     output::table::clips(&feed.clips);
@@ -440,9 +368,9 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
             match fmt {
                 OutputFormat::Json => {
                     if feed.clips.is_empty() {
-                        output::json::with_status("no_results", &feed.clips);
+                        output::json::with_status("no_results", &feed.clips)?;
                     } else {
-                        output::json::success(&feed.clips);
+                        output::json::success(&feed.clips)?;
                     }
                 }
                 OutputFormat::Table => {
@@ -461,7 +389,7 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
             }
             let result = client().await?.generate_lyrics(&args.prompt).await?;
             match fmt {
-                OutputFormat::Json => output::json::success(&result),
+                OutputFormat::Json => output::json::success(&result)?,
                 OutputFormat::Table => output::table::lyrics(&result),
             }
         }
@@ -474,30 +402,68 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
                 (_, Some(path)) => Some(read_input_file(path)?),
                 _ => None,
             };
-            reject_unfilled_scaffold(lyrics.as_deref(), args.force)?;
+            reject_unfilled_scaffold(lyrics.as_deref(), args.allow_placeholders)?;
             let tags = build_tags(args.tags.as_deref(), args.vocal.as_ref());
             let control_sliders =
                 build_control_sliders(args.weirdness, args.style_influence, args.audio_influence);
-
-            // Guard before any credit is spent or Chrome piloted.
-            let mut guard = guard::DuplicateGuard::new(&config::data_dir(), "generate");
-            guard.acquire(args.force)?;
-
-            let c = client().await?;
 
             // Build the new v2-web request shape. Persona generation routes
             // through the same endpoint with persona_id set; the legacy
             // task="vox" field no longer exists in the v2-web schema.
             let mut req = GenerateRequest::new(model.to_api_key(), "custom");
             req.prompt = lyrics.unwrap_or_default();
-            req.title = args.title;
-            req.tags = tags;
+            req.title = args.title.unwrap_or_default();
+            req.tags = tags.unwrap_or_default();
             req.negative_tags = args.exclude.unwrap_or_default();
             req.make_instrumental = args.instrumental;
             req.persona_id = args.persona.clone();
             req.metadata.control_sliders = control_sliders;
-
-            req.token = resolve_captcha(&c, args.token, args.no_captcha, cli.quiet).await?;
+            req.metadata.is_max_mode = args.max_mode;
+            if let Some(id) = args.request_id {
+                req.transaction_uuid = id.to_string();
+            }
+            api::models::validate_offline(&req)?;
+            if args.dry_run {
+                preview_request(&req, fmt)?;
+                return Ok(());
+            }
+            cfg.validate()?;
+            let mut guard = guard::DuplicateGuard::new(&config::data_dir(), "generate");
+            guard.acquire(args.force)?;
+            let c = client().await?;
+            if let Some(ids) = commands::jobs::existing(&req)? {
+                let clips = if args.wait || args.download.is_some() {
+                    c.poll_clips(&ids, cfg.poll_timeout_secs, cfg.poll_interval_secs)
+                        .await
+                        .map_err(|e| generation_recovery(e, &ids))?
+                } else {
+                    c.get_existing_clips(&ids)
+                        .await
+                        .map_err(|e| generation_recovery(e, &ids))?
+                };
+                handle_generation(
+                    &c,
+                    clips,
+                    args.wait,
+                    args.download.as_deref(),
+                    fmt,
+                    cli.quiet,
+                    &cfg,
+                )
+                .await?;
+                return Ok(());
+            }
+            c.validate_generation(&req).await?;
+            (req.token, req.token_provider) = resolve_captcha(
+                &c,
+                args.token,
+                args.token_provider,
+                args.no_captcha,
+                cli.headless,
+                cli.no_browser,
+                cli.quiet,
+            )
+            .await?;
 
             if !cli.quiet {
                 let persona_note = if args.persona.is_some() {
@@ -529,21 +495,61 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
             let tags = build_tags(args.tags.as_deref(), args.vocal.as_ref());
             let control_sliders = build_control_sliders(args.weirdness, args.style_influence, None);
 
-            let mut guard = guard::DuplicateGuard::new(&config::data_dir(), "describe");
-            guard.acquire(args.force)?;
-
             // The v2-web schema dropped `gpt_description_prompt` — inspiration
             // mode is now signalled by `create_mode: "inspiration"` and the
             // text is sent in the same `prompt` field as custom mode.
             let mut req = GenerateRequest::new(model.to_api_key(), "inspiration");
             req.prompt = args.prompt;
-            req.tags = tags;
+            req.tags = tags.unwrap_or_default();
             req.make_instrumental = args.instrumental;
             req.persona_id = args.persona.clone();
             req.metadata.control_sliders = control_sliders;
-
+            req.metadata.is_max_mode = args.max_mode;
+            if let Some(id) = args.request_id {
+                req.transaction_uuid = id.to_string();
+            }
+            api::models::validate_offline(&req)?;
+            if args.dry_run {
+                preview_request(&req, fmt)?;
+                return Ok(());
+            }
+            cfg.validate()?;
+            let mut guard = guard::DuplicateGuard::new(&config::data_dir(), "describe");
+            guard.acquire(args.force)?;
             let c = client().await?;
-            req.token = resolve_captcha(&c, args.token, args.no_captcha, cli.quiet).await?;
+            if let Some(ids) = commands::jobs::existing(&req)? {
+                let clips = if args.wait || args.download.is_some() {
+                    c.poll_clips(&ids, cfg.poll_timeout_secs, cfg.poll_interval_secs)
+                        .await
+                        .map_err(|e| generation_recovery(e, &ids))?
+                } else {
+                    c.get_existing_clips(&ids)
+                        .await
+                        .map_err(|e| generation_recovery(e, &ids))?
+                };
+                handle_generation(
+                    &c,
+                    clips,
+                    args.wait,
+                    args.download.as_deref(),
+                    fmt,
+                    cli.quiet,
+                    &cfg,
+                )
+                .await?;
+                return Ok(());
+            }
+            c.validate_generation(&req).await?;
+            (req.token, req.token_provider) = resolve_captcha(
+                &c,
+                args.token,
+                args.token_provider,
+                args.no_captcha,
+                cli.headless,
+                cli.no_browser,
+                cli.quiet,
+            )
+            .await?;
 
             if !cli.quiet {
                 eprintln!("Submitting description ({})...", model.display_name());
@@ -568,18 +574,27 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
             // extend spends credits through the same v2-web create as generate,
             // so it gets the same scaffold preflight and duplicate guard
             // before any credit is spent.
-            reject_unfilled_scaffold(args.lyrics.as_deref(), args.force)?;
+            reject_unfilled_scaffold(args.lyrics.as_deref(), args.allow_placeholders)?;
             let mut guard = guard::DuplicateGuard::new(&config::data_dir(), "extend");
             guard.acquire(args.force)?;
 
             let mut req = GenerateRequest::new(model.to_api_key(), "custom");
             req.prompt = args.lyrics.unwrap_or_default();
-            req.tags = args.tags;
+            req.tags = args.tags.unwrap_or_default();
             req.continue_clip_id = Some(args.clip_id);
             req.continue_at = Some(args.at);
 
             let c = client().await?;
-            req.token = resolve_captcha(&c, args.token, args.no_captcha, cli.quiet).await?;
+            (req.token, req.token_provider) = resolve_captcha(
+                &c,
+                args.token,
+                args.token_provider,
+                args.no_captcha,
+                cli.headless,
+                cli.no_browser,
+                cli.quiet,
+            )
+            .await?;
 
             let clips = c.generate(&req).await?;
             handle_generation(&c, clips, args.wait, None, fmt, cli.quiet, &cfg).await?;
@@ -588,7 +603,7 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
         Commands::Concat(args) => {
             let clip = client().await?.concat(&args.clip_id).await?;
             match fmt {
-                OutputFormat::Json => output::json::success(&clip),
+                OutputFormat::Json => output::json::success(&clip)?,
                 OutputFormat::Table => output::table::clips(&[clip]),
             }
         }
@@ -600,7 +615,16 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
             guard.acquire(args.force)?;
 
             let c = client().await?;
-            let token = resolve_captcha(&c, args.token, args.no_captcha, cli.quiet).await?;
+            let (token, token_provider) = resolve_captcha(
+                &c,
+                args.token,
+                args.token_provider,
+                args.no_captcha,
+                cli.headless,
+                cli.no_browser,
+                cli.quiet,
+            )
+            .await?;
             let control_sliders = build_control_sliders(None, None, args.audio_influence);
 
             if !cli.quiet {
@@ -612,6 +636,7 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
                     model.to_api_key(),
                     args.tags.as_deref(),
                     token,
+                    token_provider,
                     control_sliders,
                 )
                 .await?;
@@ -633,13 +658,27 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
             guard.acquire(args.force)?;
 
             let c = client().await?;
-            let token = resolve_captcha(&c, args.token, args.no_captcha, cli.quiet).await?;
+            let (token, token_provider) = resolve_captcha(
+                &c,
+                args.token,
+                args.token_provider,
+                args.no_captcha,
+                cli.headless,
+                cli.no_browser,
+                cli.quiet,
+            )
+            .await?;
 
             if !cli.quiet {
                 eprintln!("Remastering with {}...", args.model.to_api_key());
             }
             let clips = c
-                .remaster(&args.clip_id, args.model.to_api_key(), token)
+                .remaster(
+                    &args.clip_id,
+                    args.model.to_api_key(),
+                    token,
+                    token_provider,
+                )
                 .await?;
             handle_generation(
                 &c,
@@ -656,21 +695,21 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
         Commands::Stems(args) => {
             let clip = client().await?.stems(&args.clip_id).await?;
             match fmt {
-                OutputFormat::Json => output::json::success(&clip),
+                OutputFormat::Json => output::json::success(&clip)?,
                 OutputFormat::Table => output::table::clips(&[clip]),
             }
         }
 
         Commands::Info(args) => {
-            let clips = client()
-                .await?
-                .get_clips(std::slice::from_ref(&args.id))
-                .await?;
+            let Some(id) = args.id else {
+                return commands::agent_info::run(args.command.as_deref());
+            };
+            let clips = client().await?.get_clips(std::slice::from_ref(&id)).await?;
             if clips.is_empty() {
-                return Err(CliError::NotFound(format!("clip: {}", args.id)));
+                return Err(CliError::NotFound(format!("clip: {}", id)));
             }
             match fmt {
-                OutputFormat::Json => output::json::success(&clips[0]),
+                OutputFormat::Json => output::json::success(&clips[0])?,
                 OutputFormat::Table => output::table::clip_detail(&clips[0]),
             }
         }
@@ -678,17 +717,40 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
         Commands::Persona(args) => {
             let persona = client().await?.get_persona(&args.id).await?;
             match fmt {
-                OutputFormat::Json => output::json::success(&persona),
+                OutputFormat::Json => output::json::success(&persona)?,
                 OutputFormat::Table => output::table::persona(&persona),
             }
         }
 
+        Commands::Jobs(args) => commands::jobs::run(args.limit, fmt)?,
+
         Commands::Status(args) => {
-            let clips = client().await?.get_clips(&args.ids).await?;
-            match fmt {
-                OutputFormat::Json => output::json::success(&clips),
-                OutputFormat::Table => output::table::clips(&clips),
+            let cfg = config::AppConfig::load()?;
+            cfg.validate()?;
+            let c = client().await?;
+            let clips = if args.wait || args.download.is_some() {
+                c.poll_clips(&args.ids, cfg.poll_timeout_secs, cfg.poll_interval_secs)
+                    .await
+                    .map_err(|e| generation_recovery(e, &args.ids))?
+            } else {
+                c.get_clips(&args.ids).await?
+            };
+            if clips.is_empty() {
+                return Err(CliError::NotFound(format!(
+                    "clips: {}",
+                    args.ids.join(", ")
+                )));
             }
+            handle_generation(
+                &c,
+                clips,
+                args.wait,
+                args.download.as_deref(),
+                fmt,
+                cli.quiet,
+                &cfg,
+            )
+            .await?;
         }
 
         Commands::Download(args) => {
@@ -696,6 +758,12 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
             let out_dir = args.output.unwrap_or(cfg.output_dir);
             let c = client().await?;
             let clips = c.get_clips(&args.ids).await?;
+            let format = if args.video {
+                DownloadFormat::Mp4
+            } else {
+                args.format
+            };
+            let source = c.download_source(args.source, format).await?;
             if clips.is_empty() {
                 return Err(CliError::NotFound(format!("clip: {}", args.ids.join(", "))));
             }
@@ -714,8 +782,10 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
                 // Download + lyric-embed per clip; one bad clip (still
                 // streaming, deleted mid-batch) must not sink the rest.
                 let result: Result<String, CliError> = async {
-                    let path = download::download_clip(clip, &out_dir, args.video).await?;
-                    if !args.video {
+                    let path =
+                        download::download_clip(&c, clip, &out_dir, format, source, cli.quiet)
+                            .await?;
+                    if format == DownloadFormat::Mp3 {
                         let plain_lyrics = clip.metadata.prompt.as_deref();
                         let aligned = c.aligned_lyrics(&clip.id).await.ok();
                         download::embed_lyrics_in_mp3(
@@ -740,7 +810,9 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
                         paths.push(path);
                     }
                     Err(e) => {
-                        eprintln!("Failed: {} — {e}", clip.id);
+                        if !cli.quiet && !matches!(fmt, OutputFormat::Json) {
+                            eprintln!("Failed: {} — {e}", clip.id);
+                        }
                         failed.push(serde_json::json!({
                             "id": clip.id,
                             "error": e.to_string(),
@@ -749,22 +821,29 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
                 }
             }
 
-            if paths.is_empty() && !failed.is_empty() {
-                return Err(CliError::Download(format!(
-                    "all {} download(s) failed",
-                    failed.len()
-                )));
+            if !failed.is_empty() {
+                let ids: Vec<String> = failed
+                    .iter()
+                    .filter_map(|v| v["id"].as_str().map(str::to_owned))
+                    .collect();
+                let mut argv = vec!["suno".to_string(), "download".to_string()];
+                argv.extend(ids);
+                argv.extend([
+                    "--format".to_string(),
+                    format.extension().to_string(),
+                    "--output".to_string(),
+                    out_dir,
+                ]);
+                return Err(CliError::Diagnostic {
+                    source: Box::new(CliError::Download(format!(
+                        "{} download(s) failed; completed files are listed in details.downloaded",
+                        failed.len()
+                    ))),
+                    details: serde_json::json!({"downloaded": paths, "failed": failed, "next_action":{"argv":argv}}),
+                });
             }
-            match fmt {
-                OutputFormat::Json => {
-                    let data = serde_json::json!({ "downloaded": paths, "failed": failed });
-                    if failed.is_empty() {
-                        output::json::success(data);
-                    } else {
-                        output::json::with_status("partial_success", data);
-                    }
-                }
-                OutputFormat::Table => {}
+            if matches!(fmt, OutputFormat::Json) {
+                output::json::success(serde_json::json!({"downloaded":paths,"failed":failed}))?;
             }
         }
 
@@ -776,9 +855,9 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
             // can't answer prompts, and a timed auto-proceed deletes data the
             // caller never confirmed. Explicit -y or nothing. Restoring is
             // non-destructive (it undoes a trash), so it needs no -y.
-            if !args.yes && !args.restore {
+            if !args.yes && !args.confirm && !args.restore {
                 return Err(CliError::InvalidInput(format!(
-                    "delete requires -y to confirm — re-run: suno delete {} -y",
+                    "delete requires --confirm — re-run: suno delete {} --confirm",
                     args.ids.join(" ")
                 )));
             }
@@ -791,7 +870,7 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
                 OutputFormat::Json => output::json::success(serde_json::json!({
                     verb: args.ids.len(),
                     "ids": args.ids,
-                })),
+                }))?,
                 OutputFormat::Table => {
                     if args.restore {
                         eprintln!("Restored {} clip(s) from trash", args.ids.len());
@@ -833,7 +912,7 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
                 OutputFormat::Json => output::json::success(serde_json::json!({
                     "id": args.id,
                     "updated": changes,
-                })),
+                }))?,
                 OutputFormat::Table => eprintln!("Updated: {}", changes.join(", ")),
             }
         }
@@ -849,7 +928,7 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
                 OutputFormat::Json => output::json::success(serde_json::json!({
                     "published": args.ids,
                     "visibility": state,
-                })),
+                }))?,
                 OutputFormat::Table => eprintln!("Set {} clip(s) to {state}", args.ids.len()),
             }
         }
@@ -873,7 +952,7 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
                 }
             } else {
                 match fmt {
-                    OutputFormat::Json => output::json::success(&words),
+                    OutputFormat::Json => output::json::success(&words)?,
                     OutputFormat::Table => {
                         for w in &words {
                             if w.success {
@@ -889,7 +968,7 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
             ConfigAction::Show => {
                 let cfg = config::AppConfig::load()?;
                 match fmt {
-                    OutputFormat::Json => output::json::success(&cfg),
+                    OutputFormat::Json => output::json::success(&cfg)?,
                     OutputFormat::Table => {
                         println!("{}", serde_json::to_string_pretty(&cfg)?)
                     }
@@ -901,7 +980,7 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
                     OutputFormat::Json => output::json::success(serde_json::json!({
                         "updated": { "key": key, "value": value },
                         "path": path.display().to_string(),
-                    })),
+                    }))?,
                     OutputFormat::Table => {
                         eprintln!("Set {key} = {value} in {}", path.display())
                     }
@@ -912,7 +991,7 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
                 match fmt {
                     OutputFormat::Json => output::json::success(serde_json::json!({
                         "path": path.display().to_string(),
-                    })),
+                    }))?,
                     OutputFormat::Table => println!("{}", path.display()),
                 }
             }
@@ -927,7 +1006,7 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
                         "valid": true,
                         "path": path.display().to_string(),
                         "exists": path.exists(),
-                    })),
+                    }))?,
                     OutputFormat::Table => eprintln!(
                         "Config OK ({}{})",
                         path.display(),
@@ -961,7 +1040,7 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
         }
 
         Commands::Update(args) => {
-            // self_update drives blocking reqwest, which refuses to run on the
+            // The updater uses blocking reqwest, which refuses to run on the
             // async runtime thread (panics under debug_assertions) — hop to a
             // blocking thread.
             let (check, force, quiet) = (args.check, args.force, cli.quiet);
@@ -972,11 +1051,12 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
 
         Commands::Contract { code } => commands::contract::run(fmt, code)?,
 
+        Commands::Prompt(args) => commands::prompt::run(args, fmt)?,
         Commands::Write(args) => commands::write::run(args, fmt, cli.quiet)?,
 
         Commands::Guide(args) => commands::guide::run(args.name, fmt, cli.quiet)?,
 
-        Commands::AgentInfo => commands::agent_info::run(),
+        Commands::AgentInfo(args) => commands::agent_info::run(args.command.as_deref())?,
     }
 
     Ok(())
@@ -987,13 +1067,15 @@ async fn main() {
     // Pre-scan argv for --json before clap runs so help, version, and parse
     // errors honor it too (clap hasn't populated the Cli struct on those
     // paths).
-    let json_mode = std::env::args_os().any(|a| a == "--json")
+    let json_mode = std::env::args_os()
+        .take_while(|a| a != "--")
+        .any(|a| a == "--json")
         || !std::io::IsTerminal::is_terminal(&std::io::stdout());
 
     // try_parse so exit codes and envelopes stay ours, not clap's: help and
     // --version are data (exit 0, enveloped when piped), parse errors are bad
     // input (exit 3, JSON error envelope on stderr in JSON mode).
-    let cli = match Cli::try_parse() {
+    let mut cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(e) => {
             if matches!(
@@ -1001,7 +1083,14 @@ async fn main() {
                 clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
             ) {
                 if json_mode {
-                    output::json::help(e.to_string().trim_end());
+                    if let Err(error) = output::json::help(e.to_string().trim_end()) {
+                        output::json::error(
+                            error.error_code(),
+                            &error.to_string(),
+                            error.suggestion(),
+                        );
+                        std::process::exit(error.exit_code());
+                    }
                     std::process::exit(0);
                 }
                 e.exit();
@@ -1019,6 +1108,8 @@ async fn main() {
         }
     };
 
+    // JSON stderr must be one parseable error envelope, never mixed progress.
+    cli.quiet |= json_mode;
     let fmt = OutputFormat::detect(cli.json);
     // Race the command against Ctrl-C so the solver Chrome is torn down on
     // every exit path — it must never outlive the invocation.
@@ -1033,7 +1124,12 @@ async fn main() {
     captcha::shutdown().await;
     if let Err(e) = result {
         if json_mode {
-            output::json::error(e.error_code(), &e.to_string(), e.suggestion());
+            output::json::error_details(
+                e.error_code(),
+                &e.to_string(),
+                e.suggestion(),
+                e.details(),
+            );
         } else {
             eprintln!("Error [{}]: {}", e.error_code(), e);
             eprintln!("Hint: {}", e.suggestion());
@@ -1083,7 +1179,7 @@ mod tests {
         // ...including spans split across lines...
         let split = "[Verse]\n<4-6 lines — set the scene:\nroad trips>\n";
         assert!(reject_unfilled_scaffold(Some(split), false).is_err());
-        // ...while --force, filled lyrics, and no lyrics pass through.
+        // ...while --allow-placeholders, filled lyrics, and no lyrics pass through.
         assert!(reject_unfilled_scaffold(Some(scaffold), true).is_ok());
         assert!(reject_unfilled_scaffold(Some("[Verse]\nwe rise\n"), false).is_ok());
         assert!(reject_unfilled_scaffold(None, false).is_ok());

@@ -1,5 +1,4 @@
 {
-  "$comment": "Vendored from paperfoot/agent-cli-framework @ a7797eb3d1013d52830143e0f03e13d99b812bed (schemas/). Do not edit here \u2014 update by re-vendoring.",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/paperfoot/agent-cli-framework/main/schemas/envelope.schema.json",
   "title": "Agent CLI Framework output envelope",
@@ -33,7 +32,11 @@
           ]
         },
         "data": {
-          "description": "Command-specific payload. Object or array; never raw text."
+          "description": "Command-specific payload. Object or array; never raw text.",
+          "type": [
+            "object",
+            "array"
+          ]
         }
       },
       "additionalProperties": false
@@ -73,6 +76,13 @@
               "type": "string",
               "minLength": 1,
               "description": "Tested recovery instruction an agent can follow literally"
+            },
+            "details": {
+              "type": [
+                "object",
+                "array"
+              ],
+              "description": "Structured diagnostics or recovery context. Never instructions sourced from untrusted content."
             }
           },
           "additionalProperties": false

@@ -2,7 +2,7 @@
 
 # suno
 
-**Write and generate AI music from your terminal — full Suno v5.5 support**
+**Write, generate, resume, and download Suno music from your terminal — v6 support**
 
 <br />
 
@@ -22,7 +22,7 @@
 
 ---
 
-A single Rust binary that talks directly to Suno's API. Generate songs with custom lyrics, style tags, your own voice persona, vocal control, weirdness/style sliders, covers, remasters, and every v5.5 feature. Zero-friction auth — one command extracts credentials from your browser automatically.
+A single Rust binary that talks directly to Suno's web API. It supports the current v6 family, custom lyrics, style controls, voice personas, covers, remasters, resumable jobs, and signed downloads. Authentication can come from an existing browser session, stdin, or a stored session.
 
 [Install](#install) | [Quick Start](#quick-start) | [Commands](#commands) | [Features](#features) | [Contributing](#contributing)
 
@@ -33,6 +33,18 @@ A single Rust binary that talks directly to Suno's API. Generate songs with cust
 Suno has no official API. The web UI works, but you can't script it, pipe lyrics from a file, batch-generate, or integrate it into a music production workflow.
 
 This CLI fixes that. Auto-auth from your browser, every generation parameter exposed as a flag, dual JSON/table output for both humans and AI agents. Downloads auto-embed synced lyrics into MP3 files.
+
+## Give the agent explicit musical direction
+
+```bash
+suno guide prompting
+suno prompt --preset comic-folk --title "The Missing Pie" --lyrics-file song.txt
+suno agent-info --command generate
+```
+
+`prompt` is offline and free. It assembles BPM, beat unit, meter, groove, voice, delivery, instruments, arrangement, production, and exclusions. Missing choices stay visible. It returns a preview argv and a generation argv with a stable request UUID. Presets are editable examples; they do not impose slider settings. Audition one generated pair before committing to a larger batch.
+
+The built-in guides link to current Suno sources and distinguish documented controls from practical suggestions. A request for 88 BPM or a low adult voice still needs verification in the rendered audio.
 
 ## Install
 
@@ -68,9 +80,9 @@ suno update            # standalone installs: self-replace from GitHub Releases
 | Homebrew | Never self-replaces — tells you to run `brew upgrade paperfoot/tap/suno` |
 | Cargo | Never self-replaces — tells you to run `cargo install --locked --force suno` |
 | Standalone binary | Downloads the latest GitHub release over HTTPS and swaps it in |
-| Unrecognized | Fails closed (exit 2) rather than risk overwriting a package-manager binary — reinstall from a known channel |
+| Unrecognized | Returns instructions without replacement; latest_version stays null unless --check queried GitHub |
 
-Standalone self-update fetches the release asset from GitHub over HTTPS. Signed-artifact / attestation verification of the downloaded binary is a tracked follow-up (see [Known limitations](#known-limitations)).
+Standalone updates select the exact platform archive, verify its SHA256 against GitHub release metadata or checksums.txt, extract only the expected executable, check its version, then replace the binary. Unknown locations return installation instructions unless explicitly declared standalone with SUNO_INSTALL_SOURCE.
 
 After updating, run `suno skill install` to refresh the agent skill.
 
@@ -107,7 +119,7 @@ suno generate \
 suno describe --prompt "a chill lo-fi track about rainy mornings" --wait
 ```
 
-Generation costs ~70 credits per call on v5.5 (35 per clip, 2 clips per call — measured live). Older models are cheaper; `suno lyrics` is free. Check `suno models` for what your plan can use.
+Suno documents standard v6 generation as 10 credits for two songs. Max Mode and prompts with many image or video inputs cost more. `suno lyrics` does not render audio. Check `suno credits` and `suno models` for the account's current billing and catalogue.
 
 ## Write a song
 
@@ -121,11 +133,11 @@ suno write --genre "indie rock" --theme "late-night city drives" --vocal male --
 suno generate --title "..." --tags "..." --lyrics-file song.txt --wait --download ./songs/
 ```
 
-`--out` writes the **lyric block only** — no title, no style prompt, no tag list — so the file feeds `generate --lyrics-file` directly and nothing but lyrics reaches the model. Bare `suno write` at a terminal prints that same lyric block to stdout, so copy-paste is always safe too. The title, Style Prompt and Suno Tags go to stderr (human mode) and into the JSON envelope; `--project-out FILE` additionally saves the full composite document for humans (it must be a different path than `--out`). `suno generate` and `suno extend` refuse lyrics that still contain `<...>` scaffold placeholders — even spans split across lines (exit 3, naming the line numbers) — so an unfilled draft can never burn credits; `--force` overrides both that preflight and the duplicate-run guard.
+`--out` writes the **lyric block only** — no title, no style prompt, no tag list — so the file feeds `generate --lyrics-file` directly and nothing but lyrics reaches the model. Bare `suno write` at a terminal prints that same lyric block to stdout, so copy-paste is always safe too. The title, Style Prompt and Suno Tags go to stderr (human mode) and into the JSON envelope; `--project-out FILE` additionally saves the full composite document for humans (it must be a different path than `--out`). `suno generate` and `suno extend` refuse lyrics that still contain `<...>` scaffold placeholders — even spans split across lines (exit 3, naming the line numbers) — so an unfilled draft can never burn credits; `--allow-placeholders` sends literal placeholders when explicitly wanted. `--force` bypasses only the duplicate-run guard.
 
 Note that shell redirection (`suno write > song.txt`) receives the JSON envelope, not lyrics: output is a JSON envelope whenever stdout is not a terminal. `--out` is the way to get an editable lyrics file.
 
-Fuzzy genre matching covers ~24 subgenres; an unknown genre is passed through verbatim as a style tag, so `write` never fails on input. Piped or with `--json` you get a `{title, mode, genre, style_prompt, structure, suno_tags, structure_tags, bpm, vocal, theme, viral, instrumental, placeholders_remaining, ready_to_generate, missing_requirements, next_action, written}` envelope. `next_action.argv` is the authoritative handoff — run it as argv, never shell-parse `next_action.command`. It is `null` until `--out` names a real file, and the emitted command omits `--model` so your configured default applies (v5.5, Suno's latest, out of the box).
+Fuzzy genre matching covers ~24 subgenres; an unknown genre is passed through verbatim as a style tag, so `write` never fails on input. Piped or with `--json` you get a `{title, mode, genre, style_prompt, structure, suno_tags, structure_tags, bpm, vocal, theme, viral, instrumental, placeholders_remaining, ready_to_generate, missing_requirements, next_action, written}` envelope. `next_action.argv` is the authoritative handoff — run it as argv, never shell-parse `next_action.command`. It is `null` until `--out` names a real file, and the emitted command omits `--model` so your configured default applies (v6 out of the box).
 
 ### Priming / research songs
 
@@ -164,6 +176,7 @@ The deep references live in the built-in guides: `suno guide songwriting` for th
 ### Create
 
 ```
+suno prompt          Build an explicit musical brief and generation argv offline (free)
 suno write           Compose a Suno-ready song scaffold from the built-in grammar (free)
 suno generate        Custom mode — lyrics + tags + title + sliders + voice persona
 suno describe        Description mode — Suno writes lyrics from your prompt
@@ -180,9 +193,10 @@ suno stems           Extract vocals and instruments
 ```
 suno list            List your songs (--cursor for the next page)
 suno search <query>  Search songs by title or tags
-suno info <id>       Detailed view of a single clip
+suno info <id>       Detailed view of a single clip; without ID, discovery manifest
 suno persona <id>    View a voice persona
-suno status <ids>    Check generation progress
+suno status <ids>    Check or resume existing generation IDs (`--wait`, `--download`)
+suno jobs            List durable generation receipts for recovery
 suno credits         Show balance and plan info
 suno models          List available models with limits
 ```
@@ -190,8 +204,8 @@ suno models          List available models with limits
 ### Manage
 
 ```
-suno download <ids>  Download audio/video with embedded lyrics
-suno delete <ids>    Move clips to trash (-y to confirm; --restore undoes it)
+suno download <ids>  Download MP3/WAV/M4A/MP4 through signed preparation APIs
+suno delete <ids>    Move clips to trash (--confirm or -y; --restore undoes it)
 suno set <id>        Update title, lyrics, caption, or remove cover
 suno publish <ids>   Toggle public/private visibility
 suno timed-lyrics    Get word-level timestamped lyrics (--lrc for LRC format)
@@ -200,10 +214,10 @@ suno timed-lyrics    Get word-level timestamped lyrics (--lrc for LRC format)
 ### Config, Auth & Tooling
 
 ```
-suno auth            Set up authentication (--login | --refresh | --cookie | --jwt | --logout)
+suno auth            Set up authentication (--login | --refresh | --cookie-stdin | --jwt-stdin | --logout)
 suno config          show | set | path | check
 suno doctor          Health checks: auth, JWT, Chrome, API reach, credits, captcha state
-suno agent-info      Machine-readable capabilities JSON
+suno agent-info      Machine-readable capabilities; --command scopes to a command or group
 suno guide           List built-in songwriting guides, or print one (guides <name>)
 suno skill           install | status — agent skill for Claude Code / Codex / Gemini
 suno update          Distribution-aware update (--check to peek first)
@@ -215,19 +229,21 @@ The CLI ships its songwriting knowledge as built-in guides — a single source o
 
 ```bash
 suno guide                  # list every guide (name, aliases, description)
-suno guide songwriting      # print the guide as raw markdown to stdout
-suno guide priming          # aliases resolve too: `write`, `grammar`, `prime`
+suno guide prompting        # BPM, casting, performance, exclusions, and examples
+suno guide songwriting      # raw Markdown at a terminal, JSON when piped
+suno guide priming          # `prime` aliases priming; `grammar` aliases songwriting
 ```
 
 | Guide | What it covers |
 | --- | --- |
-| `songwriting` | How to write for Suno: structure, meta-tags, genres, vocal styles, hooks — the base grammar every song builds on |
+| `prompting` | Current sources, tempo and meter, casting, delivery, instrumentation, exclusions, sliders, and audition workflow |
+| `songwriting` | Lyrics, structure, prosody, vocal vocabulary, and an executable render workflow |
 | `priming` | Research/priming songs: evidence-graded psychological priming woven into lyrics, consent-first |
 
 Write, then generate — the guide's output maps straight onto the flags:
 
 ```bash
-suno guide songwriting > song.md      # read it, draft the Style Prompt + [Verse]/[Chorus] block
+suno guide songwriting | jq -r .data.content > song.md  # export Markdown, then draft song.txt
 suno generate --title "Weekend Code" \
   --tags "indie rock, upbeat, male vocals" \
   --lyrics-file song.txt --wait --download ./songs/
@@ -237,7 +253,7 @@ Piped or `--json`, `suno guide <name>` returns a `{name, content}` envelope; the
 
 ## Features
 
-### Zero-Friction Auth
+### Authentication
 
 ```bash
 suno auth --login    # Extracts session from your browser automatically
@@ -247,9 +263,10 @@ Reads the Clerk auth cookie from Chrome, Arc, Brave, Firefox, or Edge. Exchanges
 
 Auth methods (in order of convenience):
 1. `suno auth --login` — automatic browser extraction (recommended)
-2. `suno auth --cookie <cookie>` — manual paste for headless servers; accepts either raw `__client` or a full browser `Cookie` header
-3. `suno auth --jwt <token>` — direct JWT, expires in ~1 hour
-4. `suno auth --refresh` — force a fresh JWT from the stored Clerk session
+2. `printf '%s' "$COOKIE" | suno auth --cookie-stdin` — secret-safe input for a raw `__client` value or full Cookie header
+3. `printf '%s' "$JWT" | suno auth --jwt-stdin` — direct short-lived JWT without putting it in process arguments
+4. `suno auth --cookie <cookie>` or `suno auth --jwt <token>` — compatible argument forms
+5. `suno auth --refresh` — force a fresh JWT from the stored Clerk session
 
 `suno auth` with no flags checks the existing session, or starts browser login if no auth is configured. `suno auth --logout` removes stored credentials.
 
@@ -257,12 +274,12 @@ Auth methods (in order of convenience):
 
 | Flag | What it does | Values |
 |---|---|---|
-| `--title` | Song title | up to 100 chars |
-| `--tags` | Style direction | `"pop, synths, upbeat"` (1000 chars) |
-| `--exclude` | Styles to avoid | `"metal, heavy, dark"` (1000 chars) |
-| `--lyrics` / `--lyrics-file` | Custom lyrics with `[Verse]` tags | up to 5000 chars |
-| `--prompt` (describe) | Free text description | up to 500 chars |
-| `--model` | Model version | v5.5, v5, v4.5+, v4.5-all, v4.5, v4, v3.5, v3, v2 |
+| `--title` | Song title | up to 100 UTF-16 units |
+| `--tags` | Style direction | up to 1000 UTF-16 units |
+| `--exclude` | Styles to avoid | up to 1000 UTF-16 units |
+| `--lyrics` / `--lyrics-file` | Custom lyrics with `[Verse]` tags | up to 5000 UTF-16 units |
+| `--prompt` (describe) | Free text description | up to 3000 UTF-16 units |
+| `--model` | Model version | v6, v6-wild, v6-mini; legacy names remain parseable but are rejected if absent from the live catalogue |
 | `--vocal` | Vocal gender | male, female |
 | `--persona` | Voice persona ID | UUID from Suno voice creation |
 | `--weirdness` | How experimental | 0-100 |
@@ -271,15 +288,25 @@ Auth methods (in order of convenience):
 | `--instrumental` | No vocals | flag |
 | `--wait` | Block until done | flag |
 | `--download <dir>` | Auto-download after generation | directory path |
-| `--token` | Pre-solved hCaptcha token (headless servers) | token string |
+| `--dry-run` | Validate and print the request without authentication, submission, or credits | generate/describe flag |
+| `--max-mode` | Ask Suno to spend more compute and credits | generate/describe flag |
+| `--request-id <uuid>` | Stable retry identity | generate/describe UUID |
+| `--token` | Pre-solved captcha token (headless servers) | token string |
 | `--no-captcha` | Never run the captcha auto-solver | flag |
 | `--force` | Bypass the duplicate-run guard | flag |
 
 `--wait` exits non-zero when Suno reports the generation failed (moderation rejections exit 3 — retrying the same prompt fails identically).
 
-### Captcha Preflight
+### Browser and captcha policy
 
-Before every generate/describe/extend/cover/remaster, the CLI asks Suno whether this account is captcha-gated (`POST /api/c/check`). Most accounts are above the trust threshold, so the Chrome-piloting hCaptcha solver is skipped entirely (`Captcha not required — skipping solver` on stderr). When a captcha IS required, the solver pilots a **headless** Chrome (no window, no Dock icon); if hCaptcha rejects the headless fingerprint, it transparently retries once in a headed instance parked offscreen. Either way the Chrome is killed when the CLI exits — nothing lingers. `SUNO_CAPTCHA_HEADLESS=1` / `SUNO_CAPTCHA_HEADED=1` pin a mode; `--token` supplies a pre-solved response instead, and `--no-captcha` disables solving outright. If a challenge keeps failing, generate one song in the suno.com UI to clear it, then retry.
+Before generate/describe/extend/cover/remaster, the CLI asks `/api/c/check` whether the account is captcha-gated. With normal defaults, it may use browser automation only when required. Global `--headless` permits invisible Chrome for the challenge and never falls back to a visible window. Global `--no-browser` is HTTP-only: it never reads or launches a browser and returns `captcha_required` if a challenge needs browser work. `--token` supplies a solved token; `--token-provider 1|2` (alias `--captcha-provider`) selects hCaptcha or Turnstile; command-level `--no-captcha` disables the solver for deliberate API tests or use with `--token`.
+
+Examples:
+
+```bash
+suno --headless generate --title "Night Drive" --tags "indie rock" --lyrics-file song.txt
+suno --no-browser generate --title "Night Drive" --tags "indie rock" --lyrics-file song.txt
+```
 
 ### Voice Personas
 
@@ -302,10 +329,10 @@ Create covers with different styles or remaster clips with newer models:
 
 ```bash
 # Cover with different style tags
-suno cover <clip_id> --tags "jazz, smooth piano" --model v5.5 --wait
+suno cover <clip_id> --tags "jazz, smooth piano" --model v6 --wait
 
 # Remaster an old clip with the latest model
-suno remaster <clip_id> --model v5.5 --wait --download ./remastered/
+suno remaster <clip_id> --model v6 --wait --download ./remastered/
 ```
 
 Both route through Suno's unified web generation endpoint (`/api/generate/v2-web/`).
@@ -333,9 +360,32 @@ suno publish <clip_id_1> <clip_id_2>
 suno timed-lyrics <clip_id> --lrc > song.lrc
 ```
 
-### Downloads with Embedded Lyrics
+### Resumable generation
 
-Downloads automatically embed lyrics into MP3 files via ID3 tags:
+Use a UUID with `generate` or `describe` when an agent may retry after a timeout:
+
+```bash
+suno generate --request-id 9b2d06c7-3899-4471-a596-1b1df34b11f1 \
+  --title "Night Drive" --tags "indie rock" --lyrics-file song.txt
+suno jobs
+suno status <clip_id_1> <clip_id_2> --wait --download ./songs/
+```
+
+The CLI writes a durable receipt before submission. Reusing a request ID with the same payload returns its saved clip IDs; a changed payload or an outcome-unknown receipt is rejected rather than submitted again. Receipts contain the payload hash, state, IDs, and recovery action. They omit credentials, tokens, and lyrics. `--download` implies `--wait`, and completed clips returned by `generate`, `describe`, `cover`, `remaster`, or `status` include `local_path` after download.
+
+### Signed downloads
+
+Downloads use Suno's signed preparation APIs:
+
+```bash
+suno download <id1> <id2> --format mp3 --source auto --output ./songs/
+suno download <id> --format wav --source studio --output ./exports/
+suno download <id> --format m4a --source library --output ./songs/
+suno download <id> --format mp4 --source auto --output ./videos/
+```
+
+`--source auto` checks the account's `accessible_features` for `studio`. It uses Studio when available; otherwise it calls library authorization once, then prepares the signed URL. Suno's public bundle directly confirms Library MP3/M4A and the Studio preparation route; Library WAV uses Suno's conversion-and-polling flow. `--video` remains as a compatibility shortcut for MP4. MP3 downloads embed lyrics via ID3 tags:
+
 - **USLT** (plain lyrics) — shown in most music players
 - **SYLT** (synced word-by-word timestamps) — shown in Apple Music with timing
 
@@ -349,17 +399,13 @@ Files use slug format: `title-slug-clipid8.mp3` — no overwrites when Suno gene
 
 | Version | Codename | Default | Notes |
 |---|---|---|---|
-| **v5.5** | chirp-fenix | Yes | Latest, best quality — ≈70 credits per call (35/clip) |
-| v5 | chirp-crow | | Previous generation |
-| v4.5+ | chirp-bluejay | | Extended capabilities |
-| v4.5-all | chirp-auk-turbo | | "Best free model" per Suno — cheapest generation |
-| v4.5 | chirp-auk | | Stable |
-| v4 | chirp-v4 | | Legacy |
-| v3.5 / v3 / v2 | chirp-v3-5 / chirp-v3-0 / chirp-v2-xxl-alpha | | Early models |
+| **v6** | `chirp-hawk` | Yes | Current flagship; Pro and Premier |
+| v6-wild | `chirp-hawk-wild` | | Experimental v6; Pro and Premier |
+| v6-mini | `chirp-goose` | | Faster v6 variant; all plans |
 
-Remaster models: v5.5 = chirp-flounder, v5 = chirp-carp, v4.5+ = chirp-bass.
+Current remaster key: v6 = `chirp-halibut`.
 
-`suno models` shows what your plan can actually use, live from the API.
+Suno retired pre-v6 models on September 9, 2026. Their CLI flag names remain accepted for compatibility, but the CLI checks `/api/billing/info/` before submission and rejects a model that is absent or unavailable. `suno models` is the account-specific authority.
 
 ### Configuration
 
@@ -367,7 +413,7 @@ Config lives in a TOML file (`suno config path` shows where) and every key is ov
 
 | Key | Env var | Default | What it does |
 |---|---|---|---|
-| `default_model` | `SUNO_DEFAULT_MODEL` | `v5.5` | Default `--model` for generate/describe/extend/cover |
+| `default_model` | `SUNO_DEFAULT_MODEL` | `v6` | Default `--model` for generate/describe/extend/cover |
 | `poll_interval_secs` | `SUNO_POLL_INTERVAL_SECS` | `5` | Initial `--wait` poll backoff (doubles up to 15s) |
 | `poll_timeout_secs` | `SUNO_POLL_TIMEOUT_SECS` | `600` | Total `--wait` timeout |
 | `output_dir` | `SUNO_OUTPUT_DIR` | `.` | Default directory for `download` |
@@ -379,7 +425,7 @@ resolved location.
 
 ```bash
 suno config show                        # effective merged config
-suno config set default_model v5.5      # persist a value (v5.5 is already the default)
+suno config set default_model v6        # migrate a persisted pre-v6 override
 suno config check                       # validate the file
 ```
 
@@ -439,21 +485,21 @@ suno skill status    # which platforms have it, and whether it's current
 
 Install is idempotent (`already_current` when nothing changed). The 0.5.x spelling `suno install-skill` still works as a hidden alias. After a CLI update, re-run `suno skill install` so agents see the new surface.
 
-### API Endpoint Versions (Confirmed)
+### API surfaces and evidence
 
-| Endpoint | Version | Status |
+| Surface | Route | Evidence state |
 |---|---|---|
-| Feed | **v3** (`POST /api/feed/v3`) | Latest |
-| Generate | **v2-web** (`POST /api/generate/v2-web/`) | Latest web generation route |
-| Concat | **v2** (`POST /api/generate/concat/v2/`) | Latest |
-| Aligned lyrics | **v2** (`GET /api/gen/{id}/aligned_lyrics/v2/`) | Latest |
-| Persona | `GET /api/persona/get-persona-paginated/{id}/` | Confirmed |
+| Account catalogue | `GET /api/billing/info/` | Live verified for the v6 keys and limits documented above |
+| Feed | `POST /api/feed/v3` | Previously live verified and covered by contract tests |
+| Generate | `POST /api/generate/v2-web/` | Live verified for v6 custom and description generation, completion, download, and saved request replay |
+| Downloads | `/api/studio/clip/{id}/download`, `/api/download/authorize`, `/api/download/clip/{id}` | Studio MP3/WAV/M4A and Library MP3/WAV/MP4 live verified and decoded |
+| Aligned lyrics | `GET /api/gen/{id}/aligned_lyrics/v2/` | Previously live verified |
 
-Generation tasks use `/api/generate/v2-web/` with the current web request shape. Normal generation and voice-persona generation are verified; cover/remaster support is implemented but should be recaptured whenever Suno changes the web schema.
+See [API_INTELLIGENCE.md](API_INTELLIGENCE.md) for exact evidence links and the distinction between live observations, public bundle evidence, and inferred request shapes.
 
 ## Known limitations
 
-- **Self-update artifact verification is a follow-up.** Standalone self-update downloads the release binary from GitHub over HTTPS but does not yet verify a signature or attestation on the downloaded artifact. That requires release-signing infrastructure (an embedded public key + signed release assets) and is tracked as a follow-up. Until it lands, an install source that can't be recognized fails closed instead of self-replacing.
+- **Update trust.** SHA256 verification relies on the GitHub release channel. Independent release signing and attestations are not implemented.
 
 ## Contributing
 

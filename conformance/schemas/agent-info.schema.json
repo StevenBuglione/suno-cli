@@ -1,5 +1,4 @@
 {
-  "$comment": "Vendored from paperfoot/agent-cli-framework @ a7797eb3d1013d52830143e0f03e13d99b812bed (schemas/). Do not edit here \u2014 update by re-vendoring.",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/paperfoot/agent-cli-framework/main/schemas/agent-info.schema.json",
   "title": "Agent CLI Framework capability manifest (agent-info)",
@@ -17,6 +16,7 @@
     "auto_json_when_piped"
   ],
   "properties": {
+    "status": false,
     "name": {
       "type": "string",
       "minLength": 1
@@ -107,14 +107,14 @@
         },
         "env_prefix": {
           "type": "string",
-          "pattern": "^[A-Z][A-Z0-9]*_$",
+          "pattern": "^[A-Z][A-Z0-9_]*_$",
           "description": "Uppercase prefix ending in underscore, e.g. MYCLI_"
         }
       },
       "additionalProperties": true
     },
     "auto_json_when_piped": {
-      "type": "boolean"
+      "const": true
     }
   },
   "additionalProperties": true,
@@ -148,6 +148,38 @@
           "type": "array",
           "items": {
             "$ref": "#/$defs/option"
+          }
+        },
+        "effect": {
+          "enum": [
+            "read",
+            "write",
+            "mixed"
+          ],
+          "description": "Observable effects. A mixed command must explain flag-dependent behavior in effect_detail."
+        },
+        "idempotent": {
+          "type": "boolean",
+          "description": "Repeating the same request preserves its intended effects; not an exactly-once guarantee."
+        },
+        "effect_detail": {
+          "type": "string"
+        },
+        "examples": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string"
+            }
+          },
+          "description": "Argument arrays excluding the executable. Never automatically execute them during generic conformance."
+        },
+        "output_fields": {
+          "type": "array",
+          "items": {
+            "type": "string"
           }
         }
       },

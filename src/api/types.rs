@@ -25,6 +25,10 @@ pub struct BillingInfo {
     pub renews_on: Option<String>,
     #[serde(default)]
     pub remaster_model_types: Vec<RemasterModelInfo>,
+    #[serde(default)]
+    pub accessible_features: Vec<Feature>,
+    #[serde(default)]
+    pub download_usage: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -98,6 +102,12 @@ pub struct Clip {
     pub upvote_count: u64,
     #[serde(default)]
     pub metadata: ClipMetadata,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_download_unlocked: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -176,12 +186,14 @@ pub struct FilterPresence {
 pub struct GenerateRequest {
     /// Captcha/anti-bot token. Only needed when `/api/c/check` says the
     /// account is captcha-gated; `null` otherwise (matches the web app).
-    /// No companion `token_provider` field: Suno's v2-web schema types it as
-    /// an integer and 422s on a string, and the hCaptcha flow works without it.
+    /// token_provider is the integer returned by the captcha preflight:
+    /// 1 for hCaptcha, 2 for Turnstile. Omitted when no token is supplied.
     pub token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_provider: Option<u8>,
     pub generation_type: String,
-    pub title: Option<String>,
-    pub tags: Option<String>,
+    pub title: String,
+    pub tags: String,
     /// Always present, defaults to "" (empty string, NOT null).
     pub negative_tags: String,
     pub mv: String,
@@ -212,9 +224,10 @@ impl GenerateRequest {
     pub fn new(mv: &str, create_mode: &str) -> Self {
         Self {
             token: None,
+            token_provider: None,
             generation_type: "TEXT".to_string(),
-            title: None,
-            tags: None,
+            title: String::new(),
+            tags: String::new(),
             negative_tags: String::new(),
             mv: mv.to_string(),
             prompt: String::new(),
@@ -406,7 +419,7 @@ mod tests {
         let mut req = GenerateRequest::new("chirp-fenix", "custom");
         let v = serde_json::to_value(&req).unwrap();
         // token is null when no captcha is required (the common case); there
-        // is no token_provider field — Suno's v2-web schema rejects it.
+        // token_provider is omitted until a provider-specific token is set.
         assert_eq!(v["token"], serde_json::Value::Null);
         assert!(v.get("token_provider").is_none());
 

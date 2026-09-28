@@ -3,10 +3,12 @@ pub mod captcha;
 pub mod concat;
 pub mod cover;
 pub mod delete;
+pub mod downloads;
 pub mod feed;
 pub mod generate;
 pub mod lyrics;
 pub mod metadata;
+pub mod models;
 pub mod persona;
 pub mod remaster;
 pub mod stems;
@@ -27,11 +29,21 @@ pub struct SunoClient {
     /// kicks in well before the JWT's own `exp` claim). The lock is only
     /// held briefly to read/clone auth fields — never across awaits.
     auth: Mutex<AuthState>,
+    base_url: String,
 }
 
 const BASE_URL: &str = "https://studio-api-prod.suno.com";
 
 impl SunoClient {
+    #[cfg(test)]
+    pub(crate) fn for_test(base_url: String) -> Self {
+        Self {
+            client: Client::new(),
+            auth: Mutex::new(AuthState::default()),
+            base_url,
+        }
+    }
+
     /// Create a new client. If JWT is expired but we have a Clerk cookie,
     /// auto-refresh the JWT transparently.
     pub async fn new_with_refresh(mut auth: AuthState) -> Result<Self, CliError> {
@@ -45,29 +57,23 @@ impl SunoClient {
             // Try auto-refresh via Clerk cookie
             if let (Some(cookie), Some(session_id)) = (&auth.clerk_client_cookie, &auth.session_id)
             {
-                eprintln!("JWT expired, refreshing via Clerk...");
                 match auth::clerk_refresh_jwt(&client, cookie, session_id).await {
                     Ok(jwt) => {
                         auth.jwt = Some(jwt);
                         auth.save()?;
-                        eprintln!("JWT refreshed successfully");
                     }
-                    Err(e) => {
-                        eprintln!("JWT refresh failed: {e}");
+                    Err(_) => {
                         return Err(CliError::AuthExpired);
                     }
                 }
             } else if let Some(cookie) = &auth.clerk_client_cookie {
-                eprintln!("JWT expired, recovering Clerk session...");
                 match auth::clerk_token_exchange(&client, cookie).await {
                     Ok((session_id, jwt)) => {
                         auth.session_id = Some(session_id);
                         auth.jwt = Some(jwt);
                         auth.save()?;
-                        eprintln!("JWT refreshed successfully");
                     }
-                    Err(e) => {
-                        eprintln!("JWT refresh failed: {e}");
+                    Err(_) => {
                         return Err(CliError::AuthExpired);
                     }
                 }
@@ -79,18 +85,19 @@ impl SunoClient {
         Ok(Self {
             client,
             auth: Mutex::new(auth),
+            base_url: BASE_URL.into(),
         })
     }
 
     pub(crate) fn get(&self, path: &str) -> reqwest::RequestBuilder {
         self.client
-            .get(format!("{BASE_URL}{path}"))
+            .get(format!("{}{path}", self.base_url))
             .headers(self.headers())
     }
 
     pub(crate) fn post(&self, path: &str) -> reqwest::RequestBuilder {
         self.client
-            .post(format!("{BASE_URL}{path}"))
+            .post(format!("{}{path}", self.base_url))
             .headers(self.headers())
     }
 
@@ -195,6 +202,25 @@ impl SunoClient {
             });
         }
         if status == 429 {
+            if let Some(seconds) = resp
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| {
+                    v.parse::<u64>().ok().or_else(|| {
+                        chrono::DateTime::parse_from_rfc2822(v)
+                            .ok()
+                            .map(|d| (d.timestamp() - chrono::Utc::now().timestamp()).max(1) as u64)
+                    })
+                })
+            {
+                return Err(CliError::RateLimitedFor {
+                    seconds,
+                    suggestion: format!(
+                        "Wait at least {seconds} seconds, then retry the read or resume command"
+                    ),
+                });
+            }
             return Err(CliError::RateLimited);
         }
         if status == 404 {
@@ -223,8 +249,15 @@ impl SunoClient {
                     ),
                 });
             }
+            if status == 400 || status == 422 {
+                return Err(CliError::InvalidInput(format!("HTTP {status}: {body}")));
+            }
             return Err(CliError::Api {
-                code: "api_error",
+                code: if status.is_server_error() {
+                    "api_unavailable"
+                } else {
+                    "api_error"
+                },
                 message: format!("HTTP {status}: {body}"),
             });
         }
@@ -320,3 +353,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod lifecycle_tests;

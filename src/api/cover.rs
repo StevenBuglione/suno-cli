@@ -15,12 +15,14 @@ impl SunoClient {
         model_key: &str,
         tags: Option<&str>,
         token: Option<String>,
+        token_provider: Option<u8>,
         control_sliders: Option<ControlSliders>,
     ) -> Result<Vec<Clip>, CliError> {
         let mut req = GenerateRequest::new(model_key, "cover");
-        req.tags = tags.map(String::from);
+        req.tags = tags.unwrap_or_default().to_string();
         req.cover_clip_id = Some(clip_id.to_string());
         req.token = token;
+        req.token_provider = token_provider;
         req.metadata.control_sliders = control_sliders;
         self.generate(&req).await
     }

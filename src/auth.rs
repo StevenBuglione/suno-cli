@@ -4,13 +4,25 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64URL;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::errors::CliError;
 
 const CLERK_BASE: &str = "https://auth.suno.com";
 const CLERK_JS_VERSION: &str = "5.117.0";
 const CLERK_API_VERSION: &str = "2025-11-10";
+
+/// Build the HTTP client used for Clerk authentication requests.
+///
+/// Authentication should fail promptly when Clerk is unreachable instead of
+/// leaving a headless caller waiting on reqwest's platform defaults.
+pub fn http_client() -> Result<reqwest::Client, CliError> {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(CliError::Http)
+}
 
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
 pub struct AuthState {
@@ -47,7 +59,11 @@ impl AuthState {
         let data = serde_json::to_string_pretty(self)?;
 
         // Atomic write: create temp file with restricted permissions, then rename
-        let tmp = path.with_extension("json.tmp");
+        let tmp = path.with_extension(format!(
+            "{}.{}.tmp",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
 
         #[cfg(unix)]
         {

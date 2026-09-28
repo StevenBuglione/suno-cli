@@ -107,14 +107,158 @@ fn models_map_matches_model_flag_values() {
 }
 
 #[test]
-fn generation_cost_documented_as_70() {
-    // Measured live 2026-07-18: one default v5.5 call = 70 credits
-    // (35/clip, 2 clips) — the old ~10 figure burned agents' budgets.
+fn current_v6_models_are_primary_and_legacy_models_are_labeled_retired() {
     let info = agent_info();
-    let cost = serde_json::to_string(&info["generation_cost"]).unwrap();
+    assert_eq!(info["models"]["v6"], "chirp-hawk");
+    assert_eq!(info["models"]["v6-wild"], "chirp-hawk-wild");
+    assert_eq!(info["models"]["v6-mini"], "chirp-goose");
+    assert_eq!(info["active_models"]["v6"], "chirp-hawk");
+    assert_eq!(info["active_models"]["v6-wild"], "chirp-hawk-wild");
+    assert_eq!(info["active_models"]["v6-mini"], "chirp-goose");
+    assert_eq!(info["default_model"], "chirp-hawk (v6)");
+    assert_eq!(info["remaster_models"]["v6"], "chirp-halibut");
+    assert_eq!(info["default_remaster_model"], "chirp-halibut (v6)");
+
+    let retired = info["retired_models"].as_array().unwrap();
+    assert!(retired.contains(&serde_json::json!("v5.5")));
+    assert!(!retired.contains(&serde_json::json!("v6")));
     assert!(
-        cost.contains("70"),
-        "generation_cost must state ~70 credits"
+        info["retired_models_note"]
+            .as_str()
+            .unwrap()
+            .contains("September 9")
+    );
+}
+
+#[test]
+fn generation_cost_uses_current_official_v6_guidance() {
+    let info = agent_info();
+    let cost = &info["generation_cost"];
+    assert_eq!(cost["standard_v6"]["credits"], 10);
+    assert_eq!(cost["standard_v6"]["outputs"], 2);
+    assert_eq!(cost["standard_v6"]["as_of"], "2026-09-28");
+    assert_eq!(
+        cost["standard_v6"]["source"],
+        "https://help.suno.com/en/articles/13924481"
+    );
+    assert!(cost["max_mode"].as_str().unwrap().contains("costs more"));
+    assert!(
+        cost["authority"]
+            .as_str()
+            .unwrap()
+            .contains("authoritative")
+    );
+    assert!(
+        !serde_json::to_string(cost).unwrap().contains("70"),
+        "obsolete v5.5 cost guidance must not remain"
+    );
+}
+
+#[test]
+fn headless_generation_recovery_and_download_contracts_are_explicit() {
+    let info = agent_info();
+
+    for flag in ["--headless", "--no-browser"] {
+        assert!(info["global_flags"][flag].is_object());
+        let out = suno().arg("--help").output().unwrap();
+        assert!(String::from_utf8_lossy(&out.stdout).contains(flag));
+    }
+    assert!(
+        info["global_flags"]["--headless"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("invisible")
+    );
+    assert!(
+        info["global_flags"]["--no-browser"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("never access or launch a browser")
+    );
+
+    let option_names = |command: &str| {
+        info["commands"][command]["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o["name"].as_str().unwrap())
+            .collect::<Vec<_>>()
+    };
+    for command in ["generate", "describe"] {
+        let options = option_names(command);
+        for flag in ["--dry-run", "--max-mode", "--request-id"] {
+            assert!(options.contains(&flag), "{command} must advertise {flag}");
+        }
+    }
+    for flag in ["--cookie-stdin", "--jwt-stdin"] {
+        assert!(option_names("auth").contains(&flag));
+    }
+    for flag in ["--wait", "--download"] {
+        assert!(option_names("status").contains(&flag));
+    }
+    assert_eq!(info["commands"]["jobs"]["options"][0]["default"], "10");
+    assert!(
+        info["commands"]["jobs"]["omitted_from_receipts"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("credentials"))
+    );
+
+    assert_eq!(
+        info["commands"]["download"]["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["name"] == "--format")
+            .unwrap()["values"],
+        serde_json::json!(["mp3", "wav", "m4a", "mp4"])
+    );
+    assert_eq!(
+        info["commands"]["download"]["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["name"] == "--source")
+            .unwrap()["values"],
+        serde_json::json!(["auto", "studio", "library"])
+    );
+    assert!(
+        info["commands"]["download"]["transport"]
+            .as_str()
+            .unwrap()
+            .contains("signed download-preparation APIs")
+    );
+    for command in ["generate", "describe", "cover", "remaster"] {
+        let option = info["commands"][command]["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["name"] == "--download")
+            .unwrap();
+        assert!(
+            option["description"]
+                .as_str()
+                .unwrap()
+                .contains("implies --wait")
+        );
+    }
+    assert!(
+        info["workflows"]["generation_recovery"]["steps"][1]
+            .as_str()
+            .unwrap()
+            .contains("status <id>... --wait --download DIR")
+    );
+    assert!(
+        info["workflows"]["generation_recovery"]["steps"][2]
+            .as_str()
+            .unwrap()
+            .contains("never resubmit")
+    );
+    assert!(
+        info["commands"]["credits"]["data_fields"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("download_usage"))
     );
 }
 

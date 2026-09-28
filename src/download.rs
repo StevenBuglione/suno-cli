@@ -9,18 +9,34 @@ use id3::TagLike;
 use crate::api::types::{AlignedWord, Clip};
 use crate::errors::CliError;
 
-pub async fn download_clip(clip: &Clip, output_dir: &str, video: bool) -> Result<String, CliError> {
-    let url = if video {
-        clip.video_url
-            .as_deref()
-            .ok_or_else(|| CliError::Download("no video URL available".into()))?
-    } else {
-        clip.audio_url
-            .as_deref()
-            .ok_or_else(|| CliError::Download("no audio URL available".into()))?
-    };
+pub async fn download_clip(
+    client: &crate::api::SunoClient,
+    clip: &Clip,
+    output_dir: &str,
+    format: crate::cli::DownloadFormat,
+    source: crate::cli::DownloadSource,
+    quiet: bool,
+) -> Result<String, CliError> {
+    let source = client.download_source(source, format).await?;
+    let url = client.prepare_download(clip, format, source).await?;
+    match transfer(clip, output_dir, format.extension(), &url, quiet).await {
+        Err(CliError::Http(e)) if matches!(e.status().map(|s| s.as_u16()), Some(401 | 403)) => {
+            let fresh = client
+                .prepared_download_url(&clip.id, format, source)
+                .await?;
+            transfer(clip, output_dir, format.extension(), &fresh, quiet).await
+        }
+        result => result,
+    }
+}
 
-    let ext = if video { "mp4" } else { "mp3" };
+async fn transfer(
+    clip: &Clip,
+    output_dir: &str,
+    ext: &str,
+    url: &str,
+    quiet: bool,
+) -> Result<String, CliError> {
     let filename = clip_filename(&clip.title, &clip.id, ext);
     // Create the target dir up front: generation has already spent credits by
     // the time we download, so a missing `--download` dir must not error out.
@@ -29,7 +45,7 @@ pub async fn download_clip(clip: &Clip, output_dir: &str, video: bool) -> Result
     // Stream into a sibling `.part` and only rename into place on full success,
     // so an interrupted or truncated transfer never leaves a file that looks
     // like a finished download.
-    let part_path = path.with_extension(format!("{ext}.part"));
+    let part_path = path.with_extension(format!("{ext}.{}.part", uuid::Uuid::new_v4()));
 
     // Bounded client: connect timeout, per-read inactivity timeout (catches a
     // stalled CDN mid-stream), and an overall cap. Without these a hung
@@ -39,17 +55,21 @@ pub async fn download_clip(clip: &Clip, output_dir: &str, video: bool) -> Result
         .read_timeout(Duration::from_secs(60))
         .timeout(Duration::from_secs(600))
         .build()
-        .map_err(CliError::Http)?;
+        .map_err(|e| CliError::Http(e.without_url()))?;
     let resp = client
         .get(url)
         .send()
         .await
-        .map_err(CliError::Http)?
+        .map_err(|e| CliError::Http(e.without_url()))?
         .error_for_status()
-        .map_err(CliError::Http)?;
+        .map_err(|e| CliError::Http(e.without_url()))?;
 
     let total = resp.content_length().unwrap_or(0);
-    let pb = ProgressBar::new(total);
+    let pb = if quiet {
+        ProgressBar::hidden()
+    } else {
+        ProgressBar::new(total)
+    };
     pb.set_style(
         ProgressStyle::default_bar()
             .template("{msg} [{bar:40}] {bytes}/{total_bytes} ({eta})")
@@ -68,20 +88,52 @@ pub async fn download_clip(clip: &Clip, output_dir: &str, video: bool) -> Result
 
     // Reject a short read against the advertised size instead of tagging a
     // truncated MP3 downstream.
-    if total > 0 && written != total {
+    if written == 0 || (total > 0 && written != total) {
         let _ = tokio::fs::remove_file(&part_path).await;
         return Err(CliError::Download(format!(
             "incomplete download: received {written} of {total} bytes for {filename}"
         )));
     }
 
+    // A 200 response can still be an expired-link HTML/JSON error page.
+    // Check the container before giving the file its final audio extension.
+    if let Err(e) = validate_audio_file(&part_path, ext).await {
+        let _ = tokio::fs::remove_file(&part_path).await;
+        return Err(e);
+    }
     if let Err(e) = tokio::fs::rename(&part_path, &path).await {
         let _ = tokio::fs::remove_file(&part_path).await;
         return Err(e.into());
     }
     pb.finish_with_message("done");
 
-    Ok(path.display().to_string())
+    Ok(std::fs::canonicalize(&path)?.display().to_string())
+}
+
+async fn validate_audio_file(path: &Path, ext: &str) -> Result<(), CliError> {
+    use tokio::io::AsyncReadExt;
+    let mut file = tokio::fs::File::open(path).await?;
+    let mut header = [0u8; 12];
+    let count = file.read(&mut header).await?;
+    let valid = match ext {
+        "mp3" => {
+            count >= 3
+                && (header.starts_with(b"ID3") || (header[0] == 0xff && header[1] & 0xe0 == 0xe0))
+        }
+        "wav" => {
+            count >= 12
+                && (header.starts_with(b"RIFF") || header.starts_with(b"RF64"))
+                && &header[8..12] == b"WAVE"
+        }
+        "m4a" | "mp4" => count >= 12 && &header[4..8] == b"ftyp",
+        _ => false,
+    };
+    if !valid {
+        return Err(CliError::Download(format!(
+            "response is not a valid {ext} container; no final file was saved"
+        )));
+    }
+    Ok(())
 }
 
 /// Stream a response body to `part_path`, returning the byte count written.
@@ -96,7 +148,7 @@ async fn stream_to_file(
     let mut stream = resp.bytes_stream();
     let mut written: u64 = 0;
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(CliError::Http)?;
+        let chunk = chunk.map_err(|e| CliError::Http(e.without_url()))?;
         pb.inc(chunk.len() as u64);
         written += chunk.len() as u64;
         file.write_all(&chunk).await?;
@@ -120,8 +172,16 @@ fn clip_filename(title: &str, id: &str, ext: &str) -> String {
     if slug.ends_with('-') {
         slug.pop();
     }
-    // Clip IDs are ASCII UUIDs, so a byte slice is safe here.
-    let short_id = &id[..8.min(id.len())];
+    // Bound the UTF-8 filename and tolerate unexpected IDs without panics.
+    while slug.len() > 180 {
+        slug.pop();
+    }
+    let slug = slug.trim_end_matches('-');
+    let short_id: String = id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .take(8)
+        .collect();
     if slug.is_empty() {
         format!("{short_id}.{ext}")
     } else {
@@ -181,6 +241,39 @@ pub fn embed_lyrics_in_mp3(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn rejects_successful_http_error_pages_before_saving_audio() {
+        use std::io::{Read, Write};
+        let dir = tempfile::tempdir().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 2048];
+            let _ = stream.read(&mut request).unwrap();
+            let body = "<html>expired signed URL</html>";
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+        let clip:Clip=serde_json::from_value(serde_json::json!({"id":"test","title":"test","status":"complete","model_name":"chirp-hawk","created_at":"now"})).unwrap();
+        let result = transfer(
+            &clip,
+            dir.path().to_str().unwrap(),
+            "mp3",
+            &format!("http://{address}/audio"),
+            true,
+        )
+        .await;
+        server.join().unwrap();
+        assert!(matches!(result, Err(CliError::Download(_))));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
 
     #[test]
     fn filename_collapses_separator_runs() {

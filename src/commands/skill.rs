@@ -89,7 +89,7 @@ pub fn install(fmt: OutputFormat, quiet: bool, force: bool) -> Result<(), CliErr
     }
 
     match fmt {
-        OutputFormat::Json => crate::output::json::success(&results),
+        OutputFormat::Json => crate::output::json::success(&results)?,
         OutputFormat::Table => {
             if !quiet {
                 for r in &results {
@@ -146,7 +146,7 @@ pub fn install_to_path(
             "installed": true,
             "path": dest.display().to_string(),
             "status": if already_current { "already_current" } else { "installed" },
-        })),
+        }))?,
         OutputFormat::Table => {
             if !quiet {
                 let verb = if already_current {
@@ -203,7 +203,7 @@ pub fn status(fmt: OutputFormat) -> Result<(), CliError> {
         .collect();
 
     match fmt {
-        OutputFormat::Json => crate::output::json::success(&results),
+        OutputFormat::Json => crate::output::json::success(&results)?,
         OutputFormat::Table => {
             for r in &results {
                 let state = match (r.installed, r.current) {
