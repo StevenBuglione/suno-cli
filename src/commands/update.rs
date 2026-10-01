@@ -135,8 +135,18 @@ fn detect_install_source() -> Result<InstallSource, CliError> {
 
     let cargo_bin = std::env::var_os("CARGO_HOME")
         .map(|p| Path::new(&p).join("bin"))
-        .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".cargo/bin")));
-    if cargo_bin.as_ref().is_some_and(|dir| exe.starts_with(dir)) {
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .map(|h| Path::new(&h).join(".cargo/bin"))
+        });
+    // Windows installations commonly relocate .cargo through a junction.
+    // current_exe may resolve that junction while the profile path does not.
+    let resolved_exe = std::fs::canonicalize(&exe).unwrap_or_else(|_| exe.clone());
+    if cargo_bin.is_some_and(|dir| {
+        let resolved_bin = std::fs::canonicalize(&dir).unwrap_or(dir);
+        resolved_exe.starts_with(resolved_bin)
+    }) {
         return Ok(InstallSource::Cargo);
     }
 
