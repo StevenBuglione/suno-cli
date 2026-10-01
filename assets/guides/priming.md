@@ -761,14 +761,14 @@ suno generate \
   --tags "chill lounge, downtempo, warm Rhodes, soft brushed drums, 72 BPM, intimate vocal" \
   --lyrics-file ./half-past-gold.txt \
   --vocal female \
-  --model v4.5-all \
+  --model v6 \
   --wait \
   --download ./out
 ```
 
 `--download` embeds the final lyrics into the MP3.
 
-**Verified `suno generate` flags (v0.8.0):**
+**Generation controls (discover current syntax with `suno agent-info --command generate`):**
 
 | Flag | Purpose |
 |---|---|
@@ -777,9 +777,7 @@ suno generate \
 | `--exclude <str>` | Styles/traits to keep out |
 | `--lyrics <str>` | Inline lyric block |
 | `--lyrics-file <path>` | Lyric block from a file (preferred for long, formatted lyrics) |
-| `--model <v6\|v6-wild\|v6-mini\|v5.5\|v5\|v4.5+\|v4.5\|v4.5-all\|v4>` | Model version |
-| `--duration <10-360>` | Target length in seconds (v6 custom) |
-| `--variety <0-4>` | Creative range (v6 Custom, whole number) |
+| `--model <v6\|v6-wild\|v6-mini>` | Model version |
 | `--vocal <male\|female>` | Vocal gender |
 | `--weirdness <0-100>` | Experimental/novelty dial |
 | `--style-influence <0-100>` | How hard the style tags push |
@@ -788,8 +786,9 @@ suno generate \
 | `--persona <uuid>` | Reuse a saved voice persona |
 | `--wait` | Block until the track is ready |
 | `--download <dir>` | Download the finished MP3 (embeds lyrics) |
-| `--token <str>` | Override the auth token |
+| `--token <str>` | Supply a solved captcha token (not an auth JWT) |
 | `--no-captcha` | Skip the captcha flow |
-| `--force` | Bypass the duplicate-run guard and the unresolved-placeholder preflight |
+| `--force` | Bypass the duplicate-run guard |
+| `--allow-placeholders` | Send literal lyric placeholders as written |
 
-**Cost:** v6 is plan-dependent; `v5.5` ≈ 70 credits/call; `v4.5-all` ≈ 10 credits — the cheapest remaining legacy model for iterating on drafts. `suno lyrics` is free (text only, no audio). Draft on `v4.5-all`, then re-run the winning lyric on v6 if the fidelity matters for the listener test.
+**Cost:** Suno currently documents standard v6 as 10 credits for two songs; Max Mode costs more. Use `suno models` and `suno credits` for current account state. `suno lyrics` returns text without audio. Audition one pair before a batch; the retired v4.5-all model is no longer a cheap-draft option.

@@ -1,3 +1,4 @@
+use crate::errors::CliError;
 use serde::{Deserialize, Serialize};
 
 // --- Billing / Account ---
@@ -25,6 +26,10 @@ pub struct BillingInfo {
     pub renews_on: Option<String>,
     #[serde(default)]
     pub remaster_model_types: Vec<RemasterModelInfo>,
+    #[serde(default)]
+    pub accessible_features: Vec<Feature>,
+    #[serde(default)]
+    pub download_usage: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -98,10 +103,22 @@ pub struct Clip {
     pub upvote_count: u64,
     #[serde(default)]
     pub metadata: ClipMetadata,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_download_unlocked: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct ClipMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cover_clip_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub can_remix: Option<bool>,
     pub tags: Option<String>,
     pub prompt: Option<String>,
     pub duration: Option<f64>,
@@ -174,18 +191,25 @@ pub struct FilterPresence {
 
 #[derive(Debug, Serialize)]
 pub struct GenerateRequest {
+    /// Reference operation from the current web request builder.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
     /// Captcha/anti-bot token. Only needed when `/api/c/check` says the
     /// account is captcha-gated; `null` otherwise (matches the web app).
-    /// No companion `token_provider` field: Suno's v2-web schema types it as
-    /// an integer and 422s on a string, and the hCaptcha flow works without it.
+    /// token_provider is the integer returned by the captcha preflight:
+    /// 1 for hCaptcha, 2 for Turnstile. Omitted when no token is supplied.
     pub token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_provider: Option<u8>,
     pub generation_type: String,
-    pub title: Option<String>,
-    pub tags: Option<String>,
+    pub title: String,
+    pub tags: String,
     /// Always present, defaults to "" (empty string, NOT null).
     pub negative_tags: String,
     pub mv: String,
     pub prompt: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpt_description_prompt: Option<String>,
     pub make_instrumental: bool,
     /// Target length in seconds. Current Web sends this for v6 Custom
     /// (10–360, default 180 when omitted). Skip when unset so older models
@@ -206,23 +230,64 @@ pub struct GenerateRequest {
     pub continue_clip_id: Option<String>,
     pub continued_aligned_prompt: Option<String>,
     pub continue_at: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub underpainting_clip_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overpainting_clip_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub infill_start_s: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub infill_end_s: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub infill_dur_s: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub infill_context_start_s: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub infill_context_end_s: Option<f64>,
     /// Random UUID generated per request — required.
     pub transaction_uuid: String,
 }
 
 impl GenerateRequest {
+    pub fn wire_value(&self) -> Result<serde_json::Value, CliError> {
+        let mut value = serde_json::to_value(self)?;
+        // The web infill builder omits this field so the source determines
+        // whether the replacement contains vocals.
+        if self.task.as_deref() == Some("infill") {
+            value.as_object_mut().unwrap().remove("make_instrumental");
+        }
+        if self.persona_id.is_some() {
+            let task =
+                match self.task.as_deref() {
+                    None => "vox",
+                    Some("cover") => "vox_cover",
+                    Some("extend") => "vox_extend",
+                    Some("infill") => "artist_infill",
+                    _ => return Err(CliError::InvalidInput(
+                        "voice personas are supported for creation, covers and section replacement"
+                            .into(),
+                    )),
+                };
+            value["task"] = task.into();
+            value["override_fields"] = serde_json::json!(["prompt", "tags"]);
+        }
+        Ok(value)
+    }
     /// Build a `GenerateRequest` with all the new-schema placeholder fields
     /// pre-populated (nulls, empty arrays, fresh UUIDs). Callers only need to
     /// override the fields that matter for their command.
     pub fn new(mv: &str, create_mode: &str) -> Self {
         Self {
+            task: None,
             token: None,
+            token_provider: None,
             generation_type: "TEXT".to_string(),
-            title: None,
-            tags: None,
+            title: String::new(),
+            tags: String::new(),
             negative_tags: String::new(),
             mv: mv.to_string(),
             prompt: String::new(),
+            gpt_description_prompt: None,
             make_instrumental: false,
             duration: None,
             user_uploaded_images_b64: None,
@@ -238,6 +303,13 @@ impl GenerateRequest {
             continue_clip_id: None,
             continued_aligned_prompt: None,
             continue_at: None,
+            underpainting_clip_id: None,
+            overpainting_clip_id: None,
+            infill_start_s: None,
+            infill_end_s: None,
+            infill_dur_s: None,
+            infill_context_start_s: None,
+            infill_context_end_s: None,
             transaction_uuid: uuid::Uuid::new_v4().to_string(),
         }
     }
@@ -248,6 +320,12 @@ impl GenerateRequest {
 /// empty string and arbitrary text — both succeed).
 #[derive(Debug, Serialize)]
 pub struct GenerateMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub infill_lyrics: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vocal_gender: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_remix: bool,
     pub web_client_pathname: String,
     pub is_max_mode: bool,
     pub is_mumble: bool,
@@ -267,6 +345,9 @@ impl GenerateMetadata {
     /// token. This matches what the real Suno UI sends per generation.
     pub fn new(create_mode: &str) -> Self {
         Self {
+            infill_lyrics: None,
+            vocal_gender: None,
+            is_remix: false,
             web_client_pathname: "/create".to_string(),
             is_max_mode: false,
             is_mumble: false,
@@ -433,7 +514,7 @@ mod tests {
         let mut req = GenerateRequest::new("chirp-fenix", "custom");
         let v = serde_json::to_value(&req).unwrap();
         // token is null when no captcha is required (the common case); there
-        // is no token_provider field — Suno's v2-web schema rejects it.
+        // token_provider is omitted until a provider-specific token is set.
         assert_eq!(v["token"], serde_json::Value::Null);
         assert!(v.get("token_provider").is_none());
 

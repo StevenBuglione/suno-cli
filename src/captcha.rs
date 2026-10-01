@@ -1,30 +1,13 @@
-//! hCaptcha bypass via a piloted Chrome.
-//!
-//! Suno gates `/api/generate/v2-web/` with an invisible hCaptcha challenge.
-//! The request body's `token` field must contain a freshly-solved hCaptcha
-//! response. Headless HTTP clients can't pass it; only a real browser with
-//! a warm behavioural fingerprint does.
-//!
-//! This module pilots a Chrome instance with `--remote-debugging-port`
-//! enabled, injects the user's Suno cookies via CDP, navigates to
-//! suno.com/create, then renders an invisible hCaptcha widget and calls
-//! `hcaptcha.execute()` to obtain a token.
-//!
-//! Mode policy: try `--headless=new` first (no window, no Dock icon); if the
-//! solve fails — hCaptcha has historically flagged headless Chrome with
-//! "challenge-expired" — transparently retry once in a headed instance shoved
-//! far offscreen (no window on screen, no focus steal). `SUNO_CAPTCHA_HEADLESS=1`
-//! pins headless (no fallback, for re-testing); `SUNO_CAPTCHA_HEADED=1` pins
-//! headed. Whatever we spawn is killed when the CLI exits — the solver must
-//! never outlive the invocation; within one invocation the instance is reused
-//! so back-to-back solves stay fast.
-//!
-//! Discovered + verified end-to-end on 2026-04-08.
+//! Suno captcha adapters: current Turnstile and the site's hCaptcha fallback.
+//! HTTP preflight chooses the provider. Chrome is started only for a required
+//! challenge; --headless prohibits headed fallback and --no-browser skips this
+//! module entirely. Each process owns an isolated temporary profile and closes
+//! its Chrome on exit. Tokens are single-use and never printed.
 
 use std::collections::HashSet;
 use std::process::Stdio;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
@@ -32,11 +15,16 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
-use tokio::time::{sleep, timeout};
+use tokio::time::sleep;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::auth::AuthState;
 use crate::errors::CliError;
+
+static SOLVER_QUIET: AtomicBool = AtomicBool::new(false);
+macro_rules! solver_log {
+    ($($arg:tt)*) => { if !SOLVER_QUIET.load(Ordering::Relaxed) { eprintln!($($arg)*); } };
+}
 
 /// Suno's hCaptcha sitekey, captured from the live web app's
 /// `hcaptcha.render(...)` arguments on 2026-04-08.
@@ -78,9 +66,9 @@ impl ChromeMode {
 /// Singleton holder for the Chrome process (and the mode it was spawned in)
 /// so the same instance survives across multiple `generate()` calls within
 /// one CLI invocation. Killed by `shutdown()` when the CLI exits.
-static CHROME: OnceLock<Mutex<Option<(Child, ChromeMode)>>> = OnceLock::new();
+static CHROME: OnceLock<Mutex<Option<(Child, ChromeMode, tempfile::TempDir)>>> = OnceLock::new();
 
-fn chrome_slot() -> &'static Mutex<Option<(Child, ChromeMode)>> {
+fn chrome_slot() -> &'static Mutex<Option<(Child, ChromeMode, tempfile::TempDir)>> {
     CHROME.get_or_init(|| Mutex::new(None))
 }
 
@@ -100,33 +88,51 @@ fn solve_lock() -> &'static Mutex<()> {
 /// Headless first; if hCaptcha rejects it (it fingerprints headless Chrome
 /// intermittently), fall back once to a headed instance parked offscreen.
 /// `SUNO_CAPTCHA_HEADLESS=1` / `SUNO_CAPTCHA_HEADED=1` pin a mode.
-pub async fn solve(auth: &AuthState) -> Result<String, CliError> {
-    // One solve at a time across the whole process (see SOLVE_LOCK).
+pub async fn solve(
+    auth: &AuthState,
+    headless_only: bool,
+    provider: u8,
+    quiet: bool,
+) -> Result<(String, u8), CliError> {
     let _serialized = solve_lock().lock().await;
-
-    let pin_headless = env_flag("SUNO_CAPTCHA_HEADLESS");
-    let pin_headed = env_flag("SUNO_CAPTCHA_HEADED");
+    SOLVER_QUIET.store(quiet, Ordering::Relaxed);
+    let pin_headless = headless_only || env_flag("SUNO_CAPTCHA_HEADLESS");
+    let pin_headed = !pin_headless && env_flag("SUNO_CAPTCHA_HEADED");
     let first = if pin_headed {
         ChromeMode::Headed
     } else {
         ChromeMode::Headless
     };
-
-    match solve_in(first, auth).await {
-        Err(e) if first == ChromeMode::Headless && !pin_headless => {
-            eprintln!("Headless solve failed ({e}) — retrying with an offscreen window...");
-            shutdown().await;
-            solve_in(ChromeMode::Headed, auth).await
+    // Suno's current client also latches an hCaptcha fallback after a
+    // Turnstile failure. Return the provider that actually produced the token.
+    let providers: &[u8] = if provider == 2 { &[2, 1] } else { &[1] };
+    let mut last = None;
+    for &p in providers {
+        match solve_in(first, auth, p).await {
+            Ok(token) => return Ok((token, p)),
+            Err(e) => {
+                solver_log!("Captcha provider {p} failed: {e}");
+                last = Some(e);
+                shutdown().await;
+            }
         }
-        other => other,
     }
+    if first == ChromeMode::Headless && !pin_headless {
+        solver_log!("Retrying captcha with the offscreen browser fallback...");
+        match solve_in(ChromeMode::Headed, auth, 1).await {
+            Ok(token) => return Ok((token, 1)),
+            Err(e) => last = Some(e),
+        }
+    }
+    Err(CliError::Recovery { source:Box::new(last.unwrap()), suggestion:
+        "Retry without --headless to allow the offscreen fallback, or supply a solved --token with --token-provider 1 (hCaptcha) or 2 (Turnstile). No generation was submitted.".into() })
 }
 
 fn env_flag(name: &str) -> bool {
     std::env::var(name).is_ok_and(|v| v == "1")
 }
 
-async fn solve_in(mode: ChromeMode, auth: &AuthState) -> Result<String, CliError> {
+async fn solve_in(mode: ChromeMode, auth: &AuthState, provider: u8) -> Result<String, CliError> {
     ensure_chrome_running(mode).await?;
     let target = find_or_create_suno_tab().await?;
     // A malicious local listener on the debug port can hand back a remote
@@ -138,7 +144,7 @@ async fn solve_in(mode: ChromeMode, auth: &AuthState) -> Result<String, CliError
             target.web_socket_debugger_url
         )));
     }
-    render_and_execute(&target.web_socket_debugger_url, auth).await
+    render_and_execute(&target.web_socket_debugger_url, auth, provider).await
 }
 
 /// Kill the Chrome this process spawned, if any. Called on every CLI exit
@@ -146,7 +152,7 @@ async fn solve_in(mode: ChromeMode, auth: &AuthState) -> Result<String, CliError
 /// the invocation. Instances we didn't spawn are never touched.
 pub async fn shutdown() {
     let mut slot = chrome_slot().lock().await;
-    if let Some((mut child, _)) = slot.take() {
+    if let Some((mut child, _, _profile)) = slot.take() {
         let _ = child.start_kill();
         let _ = child.wait().await;
     }
@@ -198,12 +204,12 @@ pub async fn detect_solver_chrome() -> Option<u16> {
 async fn ensure_chrome_running(mode: ChromeMode) -> Result<(), CliError> {
     {
         let mut slot = chrome_slot().lock().await;
-        if let Some((_, running_mode)) = slot.as_ref() {
+        if let Some((_, running_mode, _)) = slot.as_ref() {
             if *running_mode == mode && cdp_version().await.is_ok() {
                 return Ok(());
             }
             // Wrong mode or dead — replace it.
-            if let Some((mut child, _)) = slot.take() {
+            if let Some((mut child, _, _profile)) = slot.take() {
                 let _ = child.start_kill();
                 let _ = child.wait().await;
             }
@@ -221,12 +227,19 @@ async fn ensure_chrome_running(mode: ChromeMode) -> Result<(), CliError> {
     ACTIVE_PORT.store(port, Ordering::Relaxed);
 
     let chrome_path = locate_chrome()?;
-    let profile_dir = crate::config::data_dir().join("chrome-profile");
-    std::fs::create_dir_all(&profile_dir)?;
+    // Never share a live profile across separate CLI processes. Chrome's
+    // singleton lock otherwise makes concurrent create/cover commands launch
+    // into each other's process and miss the requested CDP port.
+    let profiles = crate::config::data_dir().join("chrome-profiles");
+    std::fs::create_dir_all(&profiles)?;
+    let profile = tempfile::Builder::new()
+        .prefix("suno-")
+        .tempdir_in(profiles)?;
+    let profile_dir = profile.path();
 
     // Either mode keeps a desktop-sized viewport: a 1x1 window makes Suno
     // serve its mobile interstitial, which never loads hCaptcha.
-    eprintln!(
+    solver_log!(
         "Launching {} Chrome for captcha solver (cleaned up on exit)...",
         mode.label()
     );
@@ -259,7 +272,7 @@ async fn ensure_chrome_running(mode: ChromeMode) -> Result<(), CliError> {
 
     {
         let mut slot = chrome_slot().lock().await;
-        *slot = Some((child, mode));
+        *slot = Some((child, mode, profile));
     }
 
     // Wait up to 10s for CDP to come up, and insist the responder is really
@@ -465,8 +478,9 @@ async fn cdp_call(
     ws.send(Message::Text(payload))
         .await
         .map_err(|e| CliError::Config(format!("CDP ws send {method}: {e}")))?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     loop {
-        let msg = timeout(Duration::from_secs(60), ws.next())
+        let msg = tokio::time::timeout_at(deadline, ws.next())
             .await
             .map_err(|_| CliError::Config(format!("CDP {method} timeout")))?
             .ok_or_else(|| CliError::Config(format!("CDP {method} ws closed")))?
@@ -495,7 +509,11 @@ async fn cdp_call(
 /// Connect to the page websocket, inject cookies, navigate to suno.com/create
 /// if needed, then render an invisible hCaptcha widget and call
 /// `hcaptcha.execute()` to obtain a token.
-async fn render_and_execute(ws_url: &str, auth: &AuthState) -> Result<String, CliError> {
+async fn render_and_execute(
+    ws_url: &str,
+    auth: &AuthState,
+    provider: u8,
+) -> Result<String, CliError> {
     let (mut ws, _) = tokio_tungstenite::connect_async(ws_url)
         .await
         .map_err(|e| CliError::Config(format!("CDP ws connect: {e}")))?;
@@ -522,10 +540,8 @@ async fn render_and_execute(ws_url: &str, auth: &AuthState) -> Result<String, Cl
     )
     .await?;
 
-    // Clear only Suno-origin cookies, never the whole profile: this Chrome may
-    // be the user's own debug instance. Stale analytics and Clerk duplicates
-    // can make suno.com/create fail with HTTP 431 before hCaptcha loads, so we
-    // still wipe the Suno set — just scoped to those origins.
+    // Keep only the Suno-origin cookie set in our isolated profile. Duplicate
+    // Clerk/analytics cookies can cause HTTP 431 before the captcha SDK loads.
     clear_suno_cookies(&mut ws, &mut next).await?;
 
     // Inject only the narrow Suno/Clerk cookie subset required to let the web
@@ -550,7 +566,18 @@ async fn render_and_execute(ws_url: &str, auth: &AuthState) -> Result<String, Cl
     )
     .await?;
 
-    // Poll for hcaptcha global (up to 30s).
+    if provider == 2 {
+        cdp_call(&mut ws, next(), "Runtime.evaluate", serde_json::json!({
+            "expression": "if (!window.turnstile && !document.querySelector('script[src*=\"challenges.cloudflare.com/turnstile\"]')) { const s = document.createElement('script'); s.src='https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit'; document.head.appendChild(s); }",
+            "returnByValue": true,
+        })).await?;
+    }
+    let ready_expression = if provider == 2 {
+        "typeof turnstile !== 'undefined' && !!turnstile.render"
+    } else {
+        "typeof hcaptcha !== 'undefined' && !!hcaptcha.render"
+    };
+    // Wait for the provider SDK (up to 30s).
     let mut ready = false;
     for _ in 0..30 {
         sleep(Duration::from_secs(1)).await;
@@ -559,7 +586,7 @@ async fn render_and_execute(ws_url: &str, auth: &AuthState) -> Result<String, Cl
             next(),
             "Runtime.evaluate",
             serde_json::json!({
-                "expression": "typeof hcaptcha !== 'undefined' && !!hcaptcha.render",
+                "expression": ready_expression,
                 "returnByValue": true,
             }),
         )
@@ -577,15 +604,36 @@ async fn render_and_execute(ws_url: &str, auth: &AuthState) -> Result<String, Cl
     if !ready {
         let page_state = page_state_excerpt(&mut ws, &mut next).await?;
         return Err(CliError::Config(format!(
-            "hcaptcha never finished loading on suno.com/create ({page_state})"
+            "captcha provider {provider} never finished loading on suno.com/create ({page_state})"
         )));
     }
     // Extra settle so the SDK is fully wired up.
     sleep(Duration::from_secs(2)).await;
 
     // Render an invisible widget and execute it
-    let solve_js = format!(
-        r#"
+    let solve_js = if provider == 2 {
+        r#"(async () => {
+            return await new Promise(resolve => {
+                const div = document.createElement('div');
+                div.style.cssText='position:fixed;bottom:16px;right:16px;z-index:2147483647;';
+                document.body.appendChild(div);
+                let widget; let settled=false;
+                const finish = value => { if(settled) return; settled=true; clearTimeout(timer); resolve(value); };
+                const timer=setTimeout(()=>finish('ERR:Turnstile verification timed out'),55000);
+                try {
+                    widget=turnstile.render(div, {
+                        sitekey:'0x4AAAAAADI7xDNyj-3LcIbi', execution:'execute', appearance:'interaction-only',
+                        callback: token => finish(token),
+                        'error-callback': code => finish('ERR:Turnstile '+code),
+                        'timeout-callback': ()=>finish('ERR:Turnstile challenge timed out')
+                    });
+                    turnstile.execute(widget);
+                } catch(e) { finish('ERR:'+String(e)); }
+            });
+        })()"#.to_string()
+    } else {
+        format!(
+            r#"
         (async () => {{
             try {{
                 const div = document.createElement('div');
@@ -607,7 +655,8 @@ async fn render_and_execute(ws_url: &str, auth: &AuthState) -> Result<String, Cl
             }}
         }})()
         "#
-    );
+        )
+    };
 
     let result = cdp_call(
         &mut ws,
@@ -629,10 +678,12 @@ async fn render_and_execute(ws_url: &str, auth: &AuthState) -> Result<String, Cl
         .to_string();
 
     if token.is_empty() {
-        return Err(CliError::Config("hcaptcha returned empty token".into()));
+        return Err(CliError::Config("captcha returned empty token".into()));
     }
     if token.starts_with("ERR:") {
-        return Err(CliError::Config(format!("hcaptcha solver: {token}")));
+        return Err(CliError::Config(format!(
+            "captcha provider {provider}: {token}"
+        )));
     }
     Ok(token)
 }
@@ -815,7 +866,7 @@ fn add_live_browser_cookies(
         add_minimal_cookie(&c.name, &c.value, &c.domain, c.http_only, out, seen);
     }
     if !out.is_empty() {
-        eprintln!("Using fresh Suno browser cookies from {browser_name}");
+        solver_log!("Using fresh Suno browser cookies from {browser_name}");
     }
     !out.is_empty()
 }

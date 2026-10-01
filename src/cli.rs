@@ -1,8 +1,28 @@
+pub fn clip_reference(value: &str) -> Result<String, String> {
+    if let Ok(id) = uuid::Uuid::parse_str(value) {
+        return Ok(id.to_string());
+    }
+    if let Ok(url) = reqwest::Url::parse(value)
+        && url.scheme() == "https"
+        && matches!(url.host_str(), Some("suno.com" | "www.suno.com"))
+        && url.username().is_empty()
+        && url.password().is_none()
+        && let Some(mut parts) = url.path_segments()
+        && parts.next() == Some("song")
+        && let Some(id) = parts.next().and_then(|id| uuid::Uuid::parse_str(id).ok())
+        && parts.all(|part| part.is_empty())
+    {
+        return Ok(id.to_string());
+    }
+    Err("expected a clip UUID or https://suno.com/song/<UUID> URL".into())
+}
+
 use clap::{Parser, Subcommand, ValueEnum};
 
 // Agents read --help to bootstrap usage; keep tips short and examples real.
 const HELP_FOOTER: &str = "\
 Which creation command:
+  prompt    Build explicit musical directions and a generation command (free)
   write     Compose the song — style prompt + lyric skeleton you fill (free)
   generate  Render audio from lyrics you already have (costs credits)
   describe  Render audio from a one-line description; Suno writes the lyrics
@@ -11,7 +31,7 @@ Which creation command:
 Tips:
   • First run: `suno auth --login`, then `suno doctor` to verify the setup
   • Output is a JSON envelope automatically when piped; force with --json
-  • `suno write` and `suno lyrics` are free; generation costs credits (v5.5 ≈70/call; v6 is plan-dependent)
+  • `suno write` and `suno lyrics` are free; standard v6 generation is documented as 10 credits for two songs
   • Exit codes: 0 ok, 1 transient (retry), 2 config/auth, 3 bad input, 4 rate limited
   • Config: `suno config path` shows the file; SUNO_* env vars override it
   • Full machine-readable manifest: `suno agent-info | jq`
@@ -38,7 +58,7 @@ Examples:
 #[command(
     name = "suno",
     version,
-    about = "Write, generate, and manage Suno music — v6 / v6-wild / v6-mini support",
+    about = "Write, generate, and manage Suno music — v6 support",
     after_long_help = HELP_FOOTER
 )]
 pub struct Cli {
@@ -52,12 +72,23 @@ pub struct Cli {
     /// Suppress non-essential output
     #[arg(long, global = true)]
     pub quiet: bool,
+
+    /// Use invisible Chrome only when a captcha is required; never open a window
+    #[arg(long, global = true)]
+    pub headless: bool,
+
+    /// Use HTTP only; never access or launch a browser
+    #[arg(long, global = true)]
+    pub no_browser: bool,
 }
 
 // Command order drives `--help` order: the creation commands lead, composer
 // first, because `write` is where a song starts.
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Build a musical brief and generation command offline (free)
+    Prompt(PromptArgs),
+
     /// Compose a Suno-ready structured song (the native song generator)
     Write(WriteArgs),
 
@@ -78,6 +109,33 @@ pub enum Commands {
 
     /// Create a cover of an existing clip
     Cover(CoverArgs),
+
+    /// Create a new song using an existing song's styles and lyrics
+    Reuse(RemixArgs),
+
+    /// Regenerate a selected section using new lyrics
+    Replace(RemixArgs),
+
+    /// Generate vocals over an existing instrumental
+    AddVocals(RemixArgs),
+
+    /// Generate accompaniment for an existing vocal recording
+    AddInstrumental(RemixArgs),
+
+    /// Trim a song to a selected time range, creating a new clip
+    Crop(CropArgs),
+
+    /// Remove a time range from a song, creating a new clip
+    Cut(CropArgs),
+
+    /// Change audio speed, optionally preserving pitch, in a new clip
+    Speed(SpeedArgs),
+
+    /// Reverse a song into a new clip
+    Reverse(EditArgs),
+
+    /// Check or resume an existing crop/cut job
+    EditStatus(EditStatusArgs),
 
     /// Remaster a clip with a different model
     Remaster(RemasterArgs),
@@ -101,6 +159,9 @@ pub enum Commands {
     /// Check generation status
     Status(StatusArgs),
 
+    /// List saved generation receipts for recovery after interruption
+    Jobs(JobsArgs),
+
     /// Download audio/video for clip(s)
     #[command(visible_alias = "dl")]
     Download(DownloadArgs),
@@ -109,7 +170,7 @@ pub enum Commands {
     #[command(visible_alias = "rm")]
     Delete(DeleteArgs),
 
-    /// Update clip title, lyrics, or caption
+    /// Update title, displayed lyrics or caption (use cover/replace to change audio)
     Set(SetArgs),
 
     /// Toggle clip public/private
@@ -134,7 +195,7 @@ pub enum Commands {
     Doctor,
 
     /// Machine-readable capabilities (for AI agents)
-    AgentInfo,
+    AgentInfo(AgentInfoArgs),
 
     /// Read built-in songwriting guides (list all, or print one)
     #[command(visible_alias = "guides")]
@@ -156,6 +217,72 @@ pub enum Commands {
         /// Exit code to trigger (0-4)
         code: i32,
     },
+}
+
+#[derive(clap::Args)]
+#[command(after_long_help = "Examples:
+  suno prompt --preset comic-folk --title 'The Missing Pie' --lyrics-file song.txt
+  suno prompt --genre 'chamber folk' --bpm 88 --meter 6/8 --beat-unit dotted-quarter --voice 'adult low alto' --delivery 'dry, deadpan, clipped consonants' --instruments 'bowed fiddle and hand drum'
+  suno prompt --list-presets
+Read `suno guide prompting` for source-backed advice, original examples, and audition checks. Missing directions are reported, never silently filled. Musical directions guide the model; they do not guarantee measured BPM, key, or casting.")]
+pub struct PromptArgs {
+    /// Show the original example presets and their full directions
+    #[arg(long)]
+    pub list_presets: bool,
+    /// Start from an example: comic-folk, work-song, solo-lament, electronic
+    #[arg(long)]
+    pub preset: Option<String>,
+    /// Main musical tradition or genre; name the sound, not just the story setting
+    #[arg(long)]
+    pub genre: Option<String>,
+    /// Emotion and energy, e.g. wry and boisterous
+    #[arg(long)]
+    pub mood: Option<String>,
+    /// Target beats per minute; pair compound meters with --beat-unit
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=999))]
+    pub bpm: Option<u32>,
+    /// Time signature, e.g. 4/4, 3/4, 6/8
+    #[arg(long)]
+    pub meter: Option<String>,
+    /// Note counted by BPM: quarter, dotted-quarter, or eighth
+    #[arg(long, value_parser = ["quarter", "dotted-quarter", "eighth"])]
+    pub beat_unit: Option<String>,
+    /// Rhythm feel, e.g. straight march, swung eighths, two-beat jig
+    #[arg(long)]
+    pub groove: Option<String>,
+    /// Target tonal center or mode, e.g. D Dorian (a direction, not a guarantee)
+    #[arg(long)]
+    pub key: Option<String>,
+    /// Specific voice casting: register, perceived age, texture, solo/group
+    #[arg(long, conflicts_with = "instrumental")]
+    pub voice: Option<String>,
+    /// Performance behavior, e.g. deadpan talk-singing or full-voice calls
+    #[arg(long)]
+    pub delivery: Option<String>,
+    /// Optional Suno vocal-gender control; free-text --voice supplies detail
+    #[arg(long, conflicts_with = "instrumental")]
+    pub vocal: Option<VocalGender>,
+    /// Instruments and their roles; say a cappella for voices alone
+    #[arg(long)]
+    pub instruments: Option<String>,
+    /// Section development, e.g. solo verse, group response, abrupt ending
+    #[arg(long)]
+    pub arrangement: Option<String>,
+    /// Recording/mix direction, e.g. dry room, close vocal, narrow stereo
+    #[arg(long)]
+    pub production: Option<String>,
+    /// Unwanted sounds; kept separate from the positive style prompt
+    #[arg(long)]
+    pub exclude: Option<String>,
+    /// No vocals (different from a cappella, which is voices without instruments)
+    #[arg(long)]
+    pub instrumental: bool,
+    /// Title included in the proposed generation command
+    #[arg(long)]
+    pub title: Option<String>,
+    /// Existing finished lyrics for the proposed generation command
+    #[arg(long)]
+    pub lyrics_file: Option<String>,
 }
 
 #[derive(clap::Args)]
@@ -336,54 +463,56 @@ pub struct GenerateArgs {
     #[arg(long)]
     pub vocal: Option<VocalGender>,
 
-    /// Target duration in seconds (v6 custom: 10–360; omit for Suno's 180s default)
-    #[arg(long)]
-    pub duration: Option<u32>,
-
-    /// Variety / creative range as a whole number 0–4 (v6 Custom)
-    #[arg(long)]
+    /// Variety / creative range as an integer 0-4 (v6)
+    #[arg(long, value_parser = clap::value_parser!(u8).range(0..=4))]
     pub variety: Option<u8>,
-
-    /// Non-lexical / mumble vocals (v6; session-gated — Suno may ignore it)
+    /// Non-lexical vocals (v6, session-gated)
     #[arg(long)]
     pub mumble: bool,
-
-    /// Max Mode — longer, more ambitious output (v6; account-gated)
-    #[arg(long)]
-    pub max_mode: bool,
+    /// Target duration in seconds, 10-360 (v6 custom)
+    #[arg(long, value_parser = clap::value_parser!(u32).range(10..=360))]
+    pub duration: Option<u32>,
 
     /// Weirdness level (0-100)
-    #[arg(long)]
+    #[arg(long, value_parser = percentage)]
     pub weirdness: Option<f64>,
 
     /// Style influence strength (0-100)
-    #[arg(long)]
+    #[arg(long, value_parser = percentage)]
     pub style_influence: Option<f64>,
 
     /// Audio influence strength (0-100) — how strongly source audio shapes
     /// the output
-    #[arg(long)]
+    #[arg(long, value_parser = percentage)]
     pub audio_influence: Option<f64>,
 
     /// Generate instrumental only (no vocals)
     #[arg(long)]
     pub instrumental: bool,
 
-    /// Bypass the duplicate-run guard and the unresolved-placeholder preflight
+    /// Bypass the duplicate-run guard
     #[arg(long)]
     pub force: bool,
+
+    /// Send literal <...> placeholders in lyrics as written
+    #[arg(long)]
+    pub allow_placeholders: bool,
 
     /// Wait for generation to complete
     #[arg(short, long)]
     pub wait: bool,
 
-    /// Download output to directory after generation
+    /// Download output to directory after generation; implies --wait
     #[arg(long)]
     pub download: Option<String>,
 
     /// hCaptcha token (overrides the auto-solver)
     #[arg(long)]
     pub token: Option<String>,
+
+    /// Captcha provider: 1=hCaptcha, 2=Turnstile (default: Suno preflight)
+    #[arg(long, visible_alias = "captcha-provider", value_parser = clap::value_parser!(u8).range(1..=2))]
+    pub token_provider: Option<u8>,
 
     /// Skip the built-in hCaptcha auto-solver. Useful for headless servers
     /// where you supply --token directly (e.g. from a 2Captcha solution).
@@ -393,6 +522,18 @@ pub struct GenerateArgs {
     /// Voice persona ID (generates with your custom voice)
     #[arg(long)]
     pub persona: Option<String>,
+
+    /// Validate and preview the request offline, without authentication or credits
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Ask Suno to spend more compute and credits on this generation
+    #[arg(long)]
+    pub max_mode: bool,
+
+    /// Stable UUID for retry recovery; a submitted ID returns the existing clips
+    #[arg(long)]
+    pub request_id: Option<uuid::Uuid>,
 }
 
 #[derive(clap::Args)]
@@ -413,24 +554,19 @@ pub struct DescribeArgs {
     #[arg(long)]
     pub vocal: Option<VocalGender>,
 
-    /// Variety / creative range as a whole number 0–4 (v6)
-    #[arg(long)]
+    /// Variety / creative range as an integer 0-4 (v6)
+    #[arg(long, value_parser = clap::value_parser!(u8).range(0..=4))]
     pub variety: Option<u8>,
-
-    /// Non-lexical / mumble vocals (v6; session-gated — Suno may ignore it)
+    /// Non-lexical vocals (v6, session-gated)
     #[arg(long)]
     pub mumble: bool,
 
-    /// Max Mode — longer, more ambitious output (v6; account-gated)
-    #[arg(long)]
-    pub max_mode: bool,
-
     /// Weirdness level (0-100)
-    #[arg(long)]
+    #[arg(long, value_parser = percentage)]
     pub weirdness: Option<f64>,
 
     /// Style influence strength (0-100)
-    #[arg(long)]
+    #[arg(long, value_parser = percentage)]
     pub style_influence: Option<f64>,
 
     /// Generate instrumental only
@@ -445,13 +581,17 @@ pub struct DescribeArgs {
     #[arg(short, long)]
     pub wait: bool,
 
-    /// Download output to directory
+    /// Download output to directory; implies --wait
     #[arg(long)]
     pub download: Option<String>,
 
     /// hCaptcha token (overrides the auto-solver)
     #[arg(long)]
     pub token: Option<String>,
+
+    /// Captcha provider: 1=hCaptcha, 2=Turnstile (default: Suno preflight)
+    #[arg(long, visible_alias = "captcha-provider", value_parser = clap::value_parser!(u8).range(1..=2))]
+    pub token_provider: Option<u8>,
 
     /// Skip the built-in hCaptcha auto-solver
     #[arg(long)]
@@ -460,6 +600,18 @@ pub struct DescribeArgs {
     /// Voice persona ID (generates with your custom voice)
     #[arg(long)]
     pub persona: Option<String>,
+
+    /// Validate and preview the request offline, without authentication or credits
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Ask Suno to spend more compute and credits on this generation
+    #[arg(long)]
+    pub max_mode: bool,
+
+    /// Stable UUID for retry recovery; a submitted ID returns the existing clips
+    #[arg(long)]
+    pub request_id: Option<uuid::Uuid>,
 }
 
 #[derive(clap::Args)]
@@ -479,8 +631,24 @@ pub struct ExtendArgs {
     pub at: f64,
 
     /// New lyrics for the extension
-    #[arg(long)]
+    #[arg(long, conflicts_with = "lyrics_file")]
     pub lyrics: Option<String>,
+
+    /// New lyrics from a UTF-8 file
+    #[arg(long)]
+    pub lyrics_file: Option<String>,
+
+    /// Download completed audio; implies --wait
+    #[arg(long)]
+    pub download: Option<String>,
+
+    /// Preview without submitting or spending credits
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Stable UUID for local request reconciliation
+    #[arg(long)]
+    pub request_id: Option<uuid::Uuid>,
 
     /// Style tags
     #[arg(long)]
@@ -494,13 +662,21 @@ pub struct ExtendArgs {
     #[arg(long)]
     pub token: Option<String>,
 
+    /// Captcha provider: 1=hCaptcha, 2=Turnstile (default: Suno preflight)
+    #[arg(long, visible_alias = "captcha-provider", value_parser = clap::value_parser!(u8).range(1..=2))]
+    pub token_provider: Option<u8>,
+
     /// Skip the built-in hCaptcha auto-solver
     #[arg(long)]
     pub no_captcha: bool,
 
-    /// Bypass the duplicate-run guard and the unresolved-placeholder preflight
+    /// Bypass the duplicate-run guard
     #[arg(long)]
     pub force: bool,
+
+    /// Send literal <...> placeholders in lyrics as written
+    #[arg(long)]
+    pub allow_placeholders: bool,
 
     /// Wait for completion
     #[arg(short, long)]
@@ -516,7 +692,54 @@ pub struct ConcatArgs {
 #[derive(clap::Args)]
 pub struct CoverArgs {
     /// Clip ID to create a cover of
+    #[arg(value_parser = clip_reference)]
     pub clip_id: String,
+
+    /// Title (defaults to the source title)
+    #[arg(long)]
+    pub title: Option<String>,
+    /// New lyrics (defaults to the source lyrics)
+    #[arg(long, conflicts_with = "lyrics_file")]
+    pub lyrics: Option<String>,
+    /// Read replacement lyrics from a UTF-8 file
+    #[arg(long)]
+    pub lyrics_file: Option<String>,
+    /// Styles to exclude
+    #[arg(long)]
+    pub exclude: Option<String>,
+    /// Vocal direction
+    #[arg(long)]
+    pub vocal: Option<VocalGender>,
+    /// Voice persona UUID
+    #[arg(long)]
+    pub persona: Option<String>,
+    /// Clear lyrics and request an instrumental cover
+    #[arg(long, conflicts_with_all = ["lyrics", "lyrics_file", "vocal"])]
+    pub instrumental: bool,
+    /// Weirdness 0-100
+    #[arg(long, value_parser = percentage)]
+    pub weirdness: Option<f64>,
+    /// Style influence 0-100
+    #[arg(long, value_parser = percentage)]
+    pub style_influence: Option<f64>,
+    /// Source reference start, in seconds
+    #[arg(long)]
+    pub start: Option<f64>,
+    /// Source reference end, in seconds
+    #[arg(long)]
+    pub end: Option<f64>,
+    /// Validate and preview without submitting or spending credits
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Saved `suno info` JSON for an entirely offline preview
+    #[arg(long, requires = "dry_run")]
+    pub source_file: Option<String>,
+    /// Stable UUID for recovery without a second paid submission
+    #[arg(long)]
+    pub request_id: Option<uuid::Uuid>,
+    /// Send literal <...> lyric placeholders
+    #[arg(long)]
+    pub allow_placeholders: bool,
 
     /// Style tags for the cover
     #[arg(long)]
@@ -528,7 +751,7 @@ pub struct CoverArgs {
 
     /// Audio influence strength (0-100) — how strongly the source clip
     /// shapes the cover
-    #[arg(long)]
+    #[arg(long, value_parser = percentage)]
     pub audio_influence: Option<f64>,
 
     /// Bypass the duplicate-run guard
@@ -539,6 +762,10 @@ pub struct CoverArgs {
     #[arg(long)]
     pub token: Option<String>,
 
+    /// Captcha provider: 1=hCaptcha, 2=Turnstile (default: Suno preflight)
+    #[arg(long, visible_alias = "captcha-provider", value_parser = clap::value_parser!(u8).range(1..=2))]
+    pub token_provider: Option<u8>,
+
     /// Skip the built-in hCaptcha auto-solver
     #[arg(long)]
     pub no_captcha: bool,
@@ -547,7 +774,80 @@ pub struct CoverArgs {
     #[arg(short, long)]
     pub wait: bool,
 
-    /// Download output to directory
+    /// Download output to directory; implies --wait
+    #[arg(long)]
+    pub download: Option<String>,
+}
+
+#[derive(clap::Args)]
+pub struct RemixArgs {
+    /// Source clip UUID or Suno song URL
+    #[arg(value_parser = clip_reference)]
+    pub clip_id: String,
+    #[command(flatten)]
+    pub generate: GenerateArgs,
+    /// Start of the section to replace, in seconds
+    #[arg(long)]
+    pub start: Option<f64>,
+    /// End of the section to replace, in seconds
+    #[arg(long)]
+    pub end: Option<f64>,
+    /// Saved `suno info` JSON for an entirely offline preview
+    #[arg(long, requires = "dry_run")]
+    pub source_file: Option<String>,
+}
+
+#[derive(clap::Args)]
+pub struct EditArgs {
+    /// Clip UUID or full Suno song URL
+    #[arg(value_parser = clip_reference)]
+    pub clip_id: String,
+    /// Title for the new clip
+    #[arg(long)]
+    pub title: Option<String>,
+    /// Wait for the new audio
+    #[arg(short, long)]
+    pub wait: bool,
+    /// Download finished audio; implies --wait
+    #[arg(long)]
+    pub download: Option<String>,
+    /// Preview the edit without submission or credits
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(clap::Args)]
+pub struct CropArgs {
+    #[command(flatten)]
+    pub edit: EditArgs,
+    /// Beginning of the range in seconds
+    #[arg(long)]
+    pub start: f64,
+    /// End of the range in seconds
+    #[arg(long)]
+    pub end: f64,
+}
+
+#[derive(clap::Args)]
+pub struct SpeedArgs {
+    #[command(flatten)]
+    pub edit: EditArgs,
+    /// Speed multiplier (e.g. 1.25)
+    #[arg(long)]
+    pub multiplier: f64,
+    /// Preserve pitch instead of transposing with speed
+    #[arg(long)]
+    pub keep_pitch: bool,
+}
+
+#[derive(clap::Args)]
+pub struct EditStatusArgs {
+    /// Existing edit action UUID
+    #[arg(value_parser = clip_reference)]
+    pub id: String,
+    #[arg(short, long)]
+    pub wait: bool,
+    /// Download completed audio; implies --wait
     #[arg(long)]
     pub download: Option<String>,
 }
@@ -561,33 +861,25 @@ pub struct RemasterArgs {
     #[arg(long, default_value = "v6")]
     pub model: RemasterModel,
 
-    /// Variation strength (subtle | normal | high). Default normal.
-    /// Not sent for v4.5+ (`chirp-bass`).
+    /// Remaster variation strength (default: normal)
     #[arg(long, value_enum)]
     pub variation: Option<RemasterVariation>,
-
-    /// v6 remaster tonal profile (natural | boost | clarity). Default boost.
-    /// v6 (`chirp-halibut`) only.
+    /// Tonal profile for v6 (default: boost)
     #[arg(long, value_enum)]
     pub style_profile: Option<RemasterStyleProfile>,
+    /// Preview the remaster request without authentication or credits
+    #[arg(long)]
+    pub dry_run: bool,
 
     /// Bypass the duplicate-run guard
     #[arg(long)]
     pub force: bool,
 
-    /// hCaptcha token (overrides the auto-solver)
-    #[arg(long)]
-    pub token: Option<String>,
-
-    /// Skip the built-in hCaptcha auto-solver
-    #[arg(long)]
-    pub no_captcha: bool,
-
     /// Wait for completion
     #[arg(short, long)]
     pub wait: bool,
 
-    /// Download output to directory
+    /// Download output to directory; implies --wait
     #[arg(long)]
     pub download: Option<String>,
 }
@@ -595,7 +887,19 @@ pub struct RemasterArgs {
 #[derive(clap::Args)]
 pub struct InfoArgs {
     /// Clip ID to inspect
-    pub id: String,
+    #[arg(conflicts_with = "command")]
+    pub id: Option<String>,
+
+    /// Discover one command; without an ID this command aliases agent-info
+    #[arg(long)]
+    pub command: Option<String>,
+}
+
+#[derive(clap::Args)]
+pub struct AgentInfoArgs {
+    /// Canonical command or group, e.g. generate or config
+    #[arg(long)]
+    pub command: Option<String>,
 }
 
 #[derive(clap::Args)]
@@ -633,6 +937,10 @@ pub struct DeleteArgs {
     #[arg(short = 'y', long)]
     pub yes: bool,
 
+    /// Confirm moving clips to trash (alias of -y/--yes)
+    #[arg(long)]
+    pub confirm: bool,
+
     /// Restore the clip(s) from trash instead of trashing them
     #[arg(long)]
     pub restore: bool,
@@ -643,6 +951,21 @@ pub struct StatusArgs {
     /// Clip ID(s) to check
     #[arg(required = true, num_args = 1..)]
     pub ids: Vec<String>,
+
+    /// Wait for these existing clips; never submits a new generation
+    #[arg(short, long)]
+    pub wait: bool,
+
+    /// Download completed clips; implies --wait
+    #[arg(long)]
+    pub download: Option<String>,
+}
+
+#[derive(clap::Args)]
+pub struct JobsArgs {
+    /// Maximum number of recent receipts
+    #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u32).range(1..=1000))]
+    pub limit: u32,
 }
 
 #[derive(clap::Args)]
@@ -658,6 +981,14 @@ pub struct DownloadArgs {
     /// Download video instead of audio
     #[arg(long)]
     pub video: bool,
+
+    /// File format; MP3 is the default
+    #[arg(long, value_enum, default_value_t = DownloadFormat::Mp3, conflicts_with = "video")]
+    pub format: DownloadFormat,
+
+    /// auto uses Studio when the account has access, otherwise the library route
+    #[arg(long, value_enum, default_value_t = DownloadSource::Auto)]
+    pub source: DownloadSource,
 }
 
 #[derive(clap::Args)]
@@ -713,6 +1044,14 @@ pub struct AuthArgs {
     #[arg(long)]
     pub login: bool,
 
+    /// Sign in in an isolated Chrome window (works with Windows encrypted cookies)
+    #[arg(long, conflicts_with_all = ["login", "refresh", "cookie", "jwt", "cookie_stdin", "jwt_stdin", "logout"])]
+    pub browser_login: bool,
+
+    /// Seconds allowed for interactive browser sign-in
+    #[arg(long, default_value_t = 900, value_parser = clap::value_parser!(u64).range(30..=3600), requires = "browser_login")]
+    pub login_timeout: u64,
+
     /// Force-refresh the JWT via the stored Clerk session cookie. Use this
     /// when the CLI returns `auth_expired` or `Token validation failed`
     /// without requiring a full re-login from the browser.
@@ -736,6 +1075,14 @@ pub struct AuthArgs {
     /// Remove stored authentication
     #[arg(long)]
     pub logout: bool,
+
+    /// Read a Clerk cookie from stdin (keeps it out of process arguments)
+    #[arg(long, conflicts_with_all = ["cookie", "jwt", "jwt_stdin", "login", "refresh", "logout"])]
+    pub cookie_stdin: bool,
+
+    /// Read a JWT from stdin (keeps it out of process arguments)
+    #[arg(long, conflicts_with_all = ["cookie", "jwt", "cookie_stdin", "login", "refresh", "logout"])]
+    pub jwt_stdin: bool,
 }
 
 #[derive(clap::Args)]
@@ -774,15 +1121,12 @@ pub enum ConfigAction {
 
 #[derive(ValueEnum, Clone, Debug, Default)]
 pub enum ModelVersion {
-    /// Flagship v6 (Pro/Premier). Internal key: chirp-hawk.
-    #[value(name = "v6", alias = "chirp-hawk")]
+    #[value(name = "v6")]
     #[default]
     V6,
-    /// Exploratory v6 variant (Pro/Premier). Internal key: chirp-hawk-wild.
-    #[value(name = "v6-wild", alias = "chirp-hawk-wild")]
+    #[value(name = "v6-wild")]
     V6Wild,
-    /// Faster compact v6 (all plans). Internal key: chirp-goose.
-    #[value(name = "v6-mini", alias = "chirp-goose")]
+    #[value(name = "v6-mini")]
     V6Mini,
     #[value(name = "v5.5")]
     V55,
@@ -805,6 +1149,10 @@ pub enum ModelVersion {
 }
 
 impl ModelVersion {
+    pub fn is_v6_family(&self) -> bool {
+        matches!(self, Self::V6 | Self::V6Wild | Self::V6Mini)
+    }
+
     pub fn to_api_key(&self) -> &'static str {
         match self {
             Self::V6 => "chirp-hawk",
@@ -838,12 +1186,6 @@ impl ModelVersion {
             Self::V2 => "v2",
         }
     }
-
-    /// v6, v6-wild, and v6-mini share the current v6 generation contract
-    /// (duration, variety, mumble, max mode).
-    pub fn is_v6_family(&self) -> bool {
-        matches!(self, Self::V6 | Self::V6Wild | Self::V6Mini)
-    }
 }
 
 #[derive(ValueEnum, Clone, Debug)]
@@ -854,7 +1196,7 @@ pub enum VocalGender {
 
 #[derive(ValueEnum, Clone, Debug, Default)]
 pub enum RemasterModel {
-    #[value(name = "v6", alias = "chirp-halibut")]
+    #[value(name = "v6")]
     #[default]
     V6,
     #[value(name = "v5.5")]
@@ -874,19 +1216,8 @@ impl RemasterModel {
             Self::V45Plus => "chirp-bass",
         }
     }
-
-    /// v4.5+ omits `variation_category`; every later remaster model sends it.
-    pub fn supports_variation(&self) -> bool {
-        !matches!(self, Self::V45Plus)
-    }
-
-    /// `style_profile` is a v6 remaster (`chirp-halibut`) field.
-    pub fn supports_style_profile(&self) -> bool {
-        matches!(self, Self::V6)
-    }
 }
 
-/// Remaster variation_category. Web values: subtle, normal (default), high.
 #[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RemasterVariation {
     #[value(name = "subtle")]
@@ -940,11 +1271,6 @@ mod tests {
         // v4.5-all is the free-tier model missing from the enum until 0.6.0.
         assert_eq!(ModelVersion::V45All.to_api_key(), "chirp-auk-turbo");
         assert_eq!(ModelVersion::V55.to_api_key(), "chirp-fenix");
-        assert_eq!(ModelVersion::V6.to_api_key(), "chirp-hawk");
-        assert_eq!(ModelVersion::V6Wild.to_api_key(), "chirp-hawk-wild");
-        assert_eq!(ModelVersion::V6Mini.to_api_key(), "chirp-goose");
-        assert!(ModelVersion::V6.is_v6_family());
-        assert!(!ModelVersion::V55.is_v6_family());
 
         // Every selectable --model value must have an API key and a display
         // name matching its clap value name (agent-info relies on this).
@@ -960,10 +1286,41 @@ mod tests {
         for m in RemasterModel::value_variants() {
             assert!(m.to_api_key().starts_with("chirp"));
         }
-        assert_eq!(RemasterModel::V6.to_api_key(), "chirp-halibut");
-        assert!(RemasterModel::V6.supports_variation());
-        assert!(RemasterModel::V6.supports_style_profile());
-        assert!(!RemasterModel::V45Plus.supports_variation());
-        assert!(!RemasterModel::V55.supports_style_profile());
+    }
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DownloadFormat {
+    #[default]
+    Mp3,
+    Wav,
+    M4a,
+    Mp4,
+}
+impl DownloadFormat {
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::Mp3 => "mp3",
+            Self::Wav => "wav",
+            Self::M4a => "m4a",
+            Self::Mp4 => "mp4",
+        }
+    }
+}
+#[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DownloadSource {
+    #[default]
+    Auto,
+    Studio,
+    Library,
+}
+fn percentage(value: &str) -> Result<f64, String> {
+    let n: f64 = value
+        .parse()
+        .map_err(|_| "expected a number from 0 to 100")?;
+    if n.is_finite() && (0.0..=100.0).contains(&n) {
+        Ok(n)
+    } else {
+        Err("expected a finite number from 0 to 100".into())
     }
 }

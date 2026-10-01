@@ -11,7 +11,7 @@ pub fn run(fmt: OutputFormat, code: i32) -> Result<(), CliError> {
                 crate::output::json::success(serde_json::json!({
                     "contract": true,
                     "exit_code": 0,
-                }));
+                }))?;
             } else {
                 println!("contract: success");
             }

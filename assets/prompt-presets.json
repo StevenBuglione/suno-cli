@@ -1,0 +1,42 @@
+{
+  "comic-folk": {
+    "genre": "English village comic folk song", "mood": "wry, rowdy, unsentimental",
+    "bpm": 104, "meter": "6/8", "beat_unit": "dotted-quarter", "groove": "two strong beats, stomping jig",
+    "key": "D Mixolydian", "voice": "one adult rough baritone, narrow range",
+    "delivery": "dry deadpan talk-singing, clipped punchlines, full voice",
+    "instruments": "scratchy bowed fiddle answers, hand drum pulse",
+    "arrangement": "short verses, group refrain, abrupt final punchline",
+    "production": "dry small room, live unpolished ensemble",
+    "exclude": "country twang, pedal steel, soft pop ballad, breathy crooning"
+  },
+  "work-song": {
+    "genre": "unaccompanied work song", "mood": "resolute, physically effortful",
+    "bpm": 80, "meter": "4/4", "beat_unit": "quarter", "groove": "steady common pulse, heavy downbeats",
+    "key": "D Dorian", "voice": "adult low solo caller and mixed adult group in unison",
+    "delivery": "short projected calls, rough group answers, audible breaths",
+    "instruments": "a cappella, voices alone",
+    "arrangement": "one call answered each phrase, repeated refrain, stop together",
+    "production": "natural room, voices at equal distance",
+    "exclude": "instruments, children's choir, polished choir, lush harmony"
+  },
+  "solo-lament": {
+    "genre": "modal solo lament", "mood": "grief held in check",
+    "bpm": 58, "meter": "3/4", "beat_unit": "quarter", "groove": "slow flexible triple pulse",
+    "key": "A Aeolian", "voice": "one adult low alto, chest register",
+    "delivery": "plain sustained melody, controlled vibrato, clear consonants",
+    "instruments": "a cappella, unaccompanied voice",
+    "arrangement": "three stanzas, no big chorus, quiet resolved ending",
+    "production": "close dry vocal, faint room air",
+    "exclude": "instruments, backing choir, breathy pop voice, orchestral swell"
+  },
+  "electronic": {
+    "genre": "minimal house", "mood": "focused, tense, energetic",
+    "bpm": 124, "meter": "4/4", "beat_unit": "quarter", "groove": "four-on-the-floor, lightly swung hats",
+    "key": "F minor", "voice": "adult low spoken voice, short repeated hook",
+    "delivery": "rhythmic clipped phrases, dry delivery",
+    "instruments": "tight kick, sub bass, syncopated analog synth stabs",
+    "arrangement": "eight-bar intro, hook, stripped break, final groove",
+    "production": "clean low end, short room reverb, clear vocal",
+    "exclude": "acoustic guitar, orchestral strings, arena EDM build"
+  }
+}
