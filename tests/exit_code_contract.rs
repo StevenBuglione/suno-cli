@@ -121,13 +121,17 @@ fn doctor_without_auth_exits_2() {
     let out = suno_in(tmp.path()).arg("doctor").output().unwrap();
     assert_eq!(out.status.code(), Some(2));
 
-    // The report itself still lands on stdout so agents can read the checks.
-    // A failing run is a partial_success envelope (config/solver checks still
-    // pass), not a "success" that happens to exit 2.
-    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(report["status"], "partial_success");
-    assert!(report["data"]["checks"].is_array());
-    let auth_check = report["data"]["checks"]
+    // Failed commands write no success-shaped data to stdout. The complete
+    // diagnostic report is attached to the one stderr error envelope.
+    assert!(out.stdout.is_empty());
+    let stderr = std::str::from_utf8(&out.stderr).unwrap();
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+    let envelope: serde_json::Value = serde_json::from_str(stderr).unwrap();
+    assert_eq!(envelope["status"], "error");
+    assert_eq!(envelope["error"]["code"], "config_error");
+    let report = &envelope["error"]["details"];
+    assert!(report["checks"].is_array());
+    let auth_check = report["checks"]
         .as_array()
         .unwrap()
         .iter()

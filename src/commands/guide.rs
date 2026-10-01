@@ -20,6 +20,12 @@ pub struct Guide {
 /// alias resolution, the agent-info `guides` array) derives from it.
 pub const GUIDES: &[Guide] = &[
     Guide {
+        name: "prompting",
+        aliases: &["prompts", "bpm", "vocals"],
+        description: "Current Suno prompting: tempo, meter, casting, performance, exclusions, sliders, examples, and audition workflow",
+        content: include_str!("../../assets/guides/prompting.md"),
+    },
+    Guide {
         name: "songwriting",
         // No `write` alias: `suno write` is a command, and `suno guide write`
         // reading as a synonym for it confused the composer with its manual.
@@ -70,7 +76,7 @@ fn list(fmt: OutputFormat, quiet: bool) -> Result<(), CliError> {
                     description: g.description,
                 })
                 .collect();
-            crate::output::json::success(&summaries);
+            crate::output::json::success(&summaries)?;
         }
         OutputFormat::Table => {
             for g in GUIDES {
@@ -100,7 +106,7 @@ fn emit(name: &str, fmt: OutputFormat) -> Result<(), CliError> {
         OutputFormat::Json => crate::output::json::success(serde_json::json!({
             "name": guide.name,
             "content": guide.content,
-        })),
+        }))?,
         // Raw markdown to stdout, verbatim — the content already ends with a
         // newline, so `print!` keeps it byte-for-byte.
         OutputFormat::Table => print!("{}", guide.content),

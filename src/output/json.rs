@@ -1,4 +1,6 @@
+use crate::errors::CliError;
 use serde::Serialize;
+use std::io::Write;
 
 #[derive(Serialize)]
 pub struct Envelope<T: Serialize> {
@@ -7,42 +9,77 @@ pub struct Envelope<T: Serialize> {
     pub data: T,
 }
 
-pub fn success<T: Serialize>(data: T) {
-    with_status("success", data);
+fn write_json<T: Serialize>(mut writer: impl Write, value: &T) -> Result<(), CliError> {
+    let mut bytes = serde_json::to_vec(value)?;
+    bytes.push(b'\n');
+    writer.write_all(&bytes)?;
+    Ok(())
 }
-
-/// Success-family envelope with a non-default status: "no_results" for empty
-/// list/search hits, "partial_success" when some items of a batch failed.
-pub fn with_status<T: Serialize>(status: &'static str, data: T) {
-    let envelope = Envelope {
+pub fn print<T: Serialize>(value: &T) -> Result<(), CliError> {
+    write_json(std::io::stdout().lock(), value)
+}
+pub fn success<T: Serialize>(data: T) -> Result<(), CliError> {
+    with_status("success", data)
+}
+pub fn with_status<T: Serialize>(status: &'static str, data: T) -> Result<(), CliError> {
+    print(&Envelope {
         version: "1",
         status,
         data,
-    };
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&envelope).unwrap_or_default()
-    );
+    })
 }
-
-/// Wrap clap's --help / --version text in a success envelope so piped help
-/// stays machine-parseable (framework: help is data, not an error).
-pub fn help(usage: &str) {
-    success(serde_json::json!({ "usage": usage }));
+pub fn help(usage: &str) -> Result<(), CliError> {
+    success(serde_json::json!({"usage":usage}))
 }
-
 pub fn error(code: &str, message: &str, suggestion: &str) {
-    let envelope = serde_json::json!({
-        "version": "1",
-        "status": "error",
-        "error": {
-            "code": code,
-            "message": message,
-            "suggestion": suggestion,
-        }
-    });
-    eprintln!(
-        "{}",
-        serde_json::to_string_pretty(&envelope).unwrap_or_default()
+    error_details(code, message, suggestion, None);
+}
+pub fn error_details(
+    code: &str,
+    message: &str,
+    suggestion: &str,
+    details: Option<serde_json::Value>,
+) {
+    let mut error = serde_json::json!({"code":code,"message":message,"suggestion":suggestion});
+    if let Some(details) = details {
+        error["details"] = details;
+    }
+    let _ = write_json(
+        std::io::stderr().lock(),
+        &serde_json::json!({"version":"1","status":"error","error":error}),
     );
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn closed_pipe_returns_error_without_panic() {
+        struct Closed;
+        impl Write for Closed {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        assert_eq!(
+            write_json(Closed, &serde_json::json!({}))
+                .unwrap_err()
+                .exit_code(),
+            1
+        );
+    }
+    #[test]
+    fn serialization_failure_writes_no_bytes() {
+        struct Invalid;
+        impl Serialize for Invalid {
+            fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("invalid"))
+            }
+        }
+        let mut buffer = vec![];
+        assert!(write_json(&mut buffer, &Invalid).is_err());
+        assert!(buffer.is_empty());
+    }
 }

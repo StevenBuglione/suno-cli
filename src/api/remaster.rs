@@ -56,14 +56,18 @@ impl SunoClient {
         variation: Option<&str>,
         style_profile: Option<&str>,
     ) -> Result<Vec<Clip>, CliError> {
-        let (variation_category, style_profile) =
-            remaster_fields(remaster_model_key, variation, style_profile)?;
-        let req = RemasterRequest {
-            clip_id: clip_id.to_string(),
-            model_name: remaster_model_key.to_string(),
-            variation_category,
-            style_profile,
-        };
+        let req = request(clip_id, remaster_model_key, variation, style_profile)?;
+        let billing = self.billing_info().await?;
+        if !billing
+            .remaster_model_types
+            .iter()
+            .any(|m| m.external_key == remaster_model_key)
+        {
+            return Err(CliError::InvalidInput(
+                "remaster model is absent from this account's current catalogue; run `suno models`"
+                    .into(),
+            ));
+        }
         self.with_auth_retry(|| async {
             let resp = self
                 .post("/api/generate/upsample")
@@ -88,6 +92,21 @@ impl SunoClient {
         })
         .await
     }
+}
+
+pub fn request(
+    clip_id: &str,
+    model: &str,
+    variation: Option<&str>,
+    style_profile: Option<&str>,
+) -> Result<RemasterRequest, CliError> {
+    let (variation_category, style_profile) = remaster_fields(model, variation, style_profile)?;
+    Ok(RemasterRequest {
+        clip_id: clip_id.into(),
+        model_name: model.into(),
+        variation_category,
+        style_profile,
+    })
 }
 
 #[cfg(test)]

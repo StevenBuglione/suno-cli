@@ -1,0 +1,1 @@
+Vendored from https://github.com/paperfoot/agent-cli-framework at cdb6add7bcf8896a5a8c1d6015e36887aa642e1a (2026-09-28). Schemas are unchanged. validate.py resolves schemas from this directory to retain the Suno repository layout.

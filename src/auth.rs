@@ -4,13 +4,26 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64URL;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::errors::CliError;
 
 const CLERK_BASE: &str = "https://auth.suno.com";
 const CLERK_JS_VERSION: &str = "5.117.0";
 const CLERK_API_VERSION: &str = "2025-11-10";
+
+/// Build the HTTP client used for Clerk authentication requests.
+///
+/// Authentication should fail promptly when Clerk is unreachable instead of
+/// leaving a headless caller waiting on reqwest's platform defaults.
+pub fn http_client() -> Result<reqwest::Client, CliError> {
+    reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36")
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(CliError::Http)
+}
 
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
 pub struct AuthState {
@@ -47,7 +60,11 @@ impl AuthState {
         let data = serde_json::to_string_pretty(self)?;
 
         // Atomic write: create temp file with restricted permissions, then rename
-        let tmp = path.with_extension("json.tmp");
+        let tmp = path.with_extension(format!(
+            "{}.{}.tmp",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
 
         #[cfg(unix)]
         {
@@ -141,7 +158,7 @@ fn parse_cookie_header(input: &str) -> HashMap<String, String> {
         .collect()
 }
 
-fn sanitize_device_id(value: &str) -> Option<String> {
+pub(crate) fn sanitize_device_id(value: &str) -> Option<String> {
     let sanitized = value
         .trim()
         .replace("%22", "\"")
@@ -259,7 +276,9 @@ pub fn extract_browser_auth() -> Result<BrowserAuth, CliError> {
                 if !cookie.domain.contains("suno.com") {
                     continue;
                 }
-                if cookie.name == "__client" && !cookie.value.is_empty() {
+                if (cookie.name == "__client" || cookie.name.starts_with("__client_"))
+                    && !cookie.value.is_empty()
+                {
                     if cookie.domain.contains("auth.suno.com") {
                         auth_domain_clerk = Some(cookie.value.clone());
                     } else if clerk_client_cookie.is_none() {
@@ -287,7 +306,7 @@ pub fn extract_browser_auth() -> Result<BrowserAuth, CliError> {
     }
 
     Err(CliError::Config(
-        "No Suno session found in any browser. Log into suno.com first, then retry.".into(),
+        "Could not read a Suno session from installed browsers. Modern Windows browser encryption can prevent extraction even when signed in. Run `suno auth --browser-login` or use `suno auth --cookie-stdin`.".into(),
     ))
 }
 

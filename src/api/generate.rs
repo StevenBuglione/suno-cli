@@ -36,27 +36,67 @@ fn validate_submission(result: GenerateResponse) -> Result<Vec<Clip>, CliError> 
     }
     if result.clips.is_empty() {
         return Err(CliError::GenerationFailed(
-            "Suno returned no clips — the generation was not created".into(),
+            "Suno returned no clips; submission outcome is unknown, check the library before resubmitting".into(),
         ));
     }
     Ok(result.clips)
 }
 
 impl SunoClient {
-    /// Submit a music generation request (custom mode or inspiration mode).
+    /// Submit a music generation request (custom mode, simple mode or remix).
     /// Posts to `/api/generate/v2-web/` — the legacy `/api/generate/v2/`
     /// returns `Token validation failed` since Suno migrated creates to
     /// `v2-web` server-side (verified 2026-04-07).
     /// Wrapped in `with_auth_retry` so a single stale-JWT failure recovers
     /// transparently via Clerk refresh.
     pub async fn generate(&self, req: &GenerateRequest) -> Result<Vec<Clip>, CliError> {
-        self.with_auth_retry(|| async {
-            let resp = self.post("/api/generate/v2-web/").json(req).send().await?;
-            let resp = self.check_response(resp).await?;
-            let result: GenerateResponse = resp.json().await?;
-            validate_submission(result)
-        })
-        .await
+        if let Some(ids) = crate::commands::jobs::existing(req)? {
+            return self.get_existing_clips(&ids).await;
+        }
+        self.validate_generation(req).await?;
+        let receipt = crate::commands::jobs::prepare(req)?;
+        let payload = req.wire_value()?;
+        let result = self
+            .with_auth_retry(|| async {
+                let resp = self
+                    .post("/api/generate/v2-web/")
+                    .json(&payload)
+                    .send()
+                    .await?;
+                let resp = self.check_response(resp).await?;
+                let result: GenerateResponse = resp.json().await?;
+                validate_submission(result)
+            })
+            .await;
+        match result {
+            Ok(clips) => {
+                let ids: Vec<String> = clips.iter().map(|c| c.id.clone()).collect();
+                crate::commands::jobs::save(&receipt, &req.transaction_uuid, &ids, "submitted")
+                    .map_err(|e| crate::generation_recovery(e, &ids))?;
+                Ok(clips)
+            }
+            Err(e) => {
+                // Transport/server failures may occur after acceptance. Never
+                // replay a paid POST automatically (auth rejection excepted).
+                let state = if matches!(
+                    e,
+                    CliError::Http(_) | CliError::Json(_) | CliError::GenerationFailed(_)
+                ) || e.retryable_read()
+                {
+                    "submission_unknown"
+                } else {
+                    "rejected"
+                };
+                let _ = crate::commands::jobs::save(&receipt, &req.transaction_uuid, &[], state);
+                Err(CliError::Recovery {
+                    source: Box::new(e),
+                    suggestion: format!(
+                        "Inspect `suno jobs` and `suno list` before resubmitting. Receipt: {}",
+                        receipt.display()
+                    ),
+                })
+            }
+        }
     }
 
     /// Poll clip status by IDs until *every requested id* is complete or
@@ -71,29 +111,63 @@ impl SunoClient {
         timeout_secs: u64,
         interval_secs: u64,
     ) -> Result<Vec<Clip>, CliError> {
-        let start = std::time::Instant::now();
-        let timeout = std::time::Duration::from_secs(timeout_secs);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
         let mut delay = std::time::Duration::from_secs(interval_secs.max(1));
         let cap = std::time::Duration::from_secs(interval_secs.max(15));
-
+        let mut known: Vec<Clip> = Vec::new();
         loop {
-            let clips = self.get_clips(ids).await?;
-
-            if all_requested_terminal(ids, &clips) {
-                return Ok(clips);
+            let mut retry_delay = None;
+            match tokio::time::timeout_at(deadline, self.get_clips(ids)).await {
+                Ok(Ok(clips)) => {
+                    for clip in clips {
+                        if let Some(old) = known.iter_mut().find(|c| c.id == clip.id) {
+                            if !is_terminal(&old.status) {
+                                *old = clip;
+                            }
+                        } else {
+                            known.push(clip);
+                        }
+                    }
+                }
+                Ok(Err(e)) if e.retryable_read() => {
+                    retry_delay = e.retry_delay();
+                }
+                Ok(Err(e)) => return Err(e),
+                Err(_) => {}
             }
-            if start.elapsed() >= timeout {
-                let pending = pending_ids(ids, &clips);
-                return Err(CliError::GenerationFailed(format!(
-                    "generation timed out after {timeout_secs}s; {} of {} clip(s) still pending: {}",
-                    pending.len(),
-                    ids.len(),
-                    pending.join(", ")
+            if all_requested_terminal(ids, &known) {
+                return Ok(known);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(CliError::GenerationPending(format!(
+                    "wait expired after {timeout_secs}s; pending IDs: {}; all IDs: {}",
+                    pending_ids(ids, &known).join(", "),
+                    ids.join(", ")
                 )));
             }
-            tokio::time::sleep(delay).await;
+            tokio::time::sleep_until(
+                (tokio::time::Instant::now()
+                    + retry_delay
+                        .unwrap_or(delay)
+                        .min(deadline.saturating_duration_since(tokio::time::Instant::now())))
+                .min(deadline),
+            )
+            .await;
             delay = (delay * 2).min(cap);
         }
+    }
+
+    /// A saved receipt is authoritative even when the feed temporarily omits
+    /// a sibling. Do not turn eventual consistency into a successful empty job.
+    pub async fn get_existing_clips(&self, ids: &[String]) -> Result<Vec<Clip>, CliError> {
+        let clips = self.get_clips(ids).await?;
+        if ids.iter().any(|id| !clips.iter().any(|c| c.id == *id)) {
+            return Err(CliError::GenerationPending(format!(
+                "saved clips are not all visible yet; resume IDs: {}",
+                ids.join(" ")
+            )));
+        }
+        Ok(clips)
     }
 
     /// Fetch clips by IDs. Batches in pairs to avoid Suno's limit

@@ -1,22 +1,59 @@
 # Changelog
 
-## v0.10.0 — Suno v6
+## v0.11.0 — fork creation, covers, and song edits
 
-Fork of paperfoot/suno-cli with support for Suno's v6 model family (launched 2026-09-09).
+- Integrate upstream v0.10.1 catalogue checks, signed downloads, receipts, discovery, and headless workflows.
+- Correct covers to explicit source-reference tasks with inherited lyrics/title/style, lyric overrides, exclusions, vocal direction, source bounds, and all three sliders. Accept Suno song URLs and UUIDs.
+- Correct description mode and current voice-persona task selection from September 30 public web code. Preserve v6 duration, integer variety, and mumble controls.
+- Add reuse, section replacement, vocal/accompaniment additions, crop/cut, speed/reverse, and edit action status.
+- Preserve the dedicated remaster upsample route and model-specific variation/style profiles. Remove the unused remaster captcha flags; the upsample route does not use that pipeline.
+- Add isolated interactive Chrome login for Windows cookie encryption restrictions, source-file offline previews, and a resumable live verification script.
+- Reduce command dispatch future sizes to prevent Windows debug stack overflow. Keep updater instructions/releases on this fork.
 
-**Added:**
+Validation is local tests, Clippy, release builds, and public source inspection. The upstream September 28 live evidence is historical upstream evidence; this fork still requires account verification. No new feature is represented as live verified solely from mock tests.
 
-- Generation models `v6` (`chirp-hawk`, new default), `v6-wild` (`chirp-hawk-wild`), `v6-mini` (`chirp-goose`). API-key aliases (`chirp-hawk`, etc.) are accepted on `--model`.
-- Remaster model `v6` (`chirp-halibut`, new remaster default). Remaster now posts to the current web route `POST /api/generate/upsample` instead of the guessed v2-web `create_mode: remaster` payload.
-- `--variation subtle|normal|high` on remaster (default `normal`; rejected for v4.5+ / `chirp-bass`).
-- `--style-profile natural|boost|clarity` on remaster (v6 only; default `boost`).
-- `--duration 10..360` on `generate` for v6 Custom (omit to use Suno's 180s default).
-- `--variety 0..4` (whole-number `metadata.control_sliders.aug_creativity`), `--mumble`, and `--max-mode` on `generate` / `describe`.
+## v0.10.1 — v6 catalogue, resumable jobs, and signed downloads
 
-**Changed:**
+- Added Turnstile provider detection, numeric `--token-provider`, and the website's hCaptcha fallback. Captcha calls have absolute deadlines; `--quiet` keeps failures machine-readable.
+- Release builds now run checks before packaging; crates.io publication failures are surfaced.
 
-- Compiled default `default_model` is `v6`. Existing `SUNO_DEFAULT_MODEL` / config-file values still win.
-- Describe prompt limit documented as 3000 chars (v6 `gpt_description_prompt` max).
+**Models and request validation:**
+
+- The out-of-box default is now v6 (`chirp-hawk`), with v6-wild (`chirp-hawk-wild`) and v6-mini (`chirp-goose`) available. The v6 remaster key is `chirp-halibut`.
+- Pre-v6 flag values remain parseable for compatibility. Suno retired those models on September 9, 2026, so the CLI now checks the account catalogue and rejects absent or unavailable models before submission.
+- Limits are validated as UTF-16 units to match the web forms: title 100, custom prompt/lyrics 5000, tags 1000, excluded styles 1000, and Simple description 3000.
+- `generate` and `describe` gained `--dry-run`, `--max-mode`, and a UUID `--request-id`. Dry runs are offline previews and explicitly report that live model validation and submission have not occurred.
+- Suno documents standard v6 generation as 10 credits for two songs. Max Mode uses more credits; the account response remains authoritative.
+
+**Recovery and headless operation:**
+
+- Generation receipts are reserved before submission and saved under the data directory. `suno jobs` lists their state, IDs, payload hash, and recovery action without storing lyrics, credentials, or tokens.
+- Reusing `--request-id` with an identical submitted payload returns the saved clip IDs. Payload mismatches and outcome-unknown submissions fail closed instead of issuing another paid request.
+- `suno status <ids> --wait --download DIR` resumes existing work and never submits a generation. `--download` implies `--wait`; downloaded clip objects include `local_path`.
+- Global `--headless` allows invisible Chrome for a required captcha with no headed fallback. Global `--no-browser` is HTTP-only and returns `captcha_required` when a browser challenge is required.
+- Each captcha process has an isolated temporary Chrome profile, preventing cross-command profile locks. JSON errors suppress progress chatter.
+- `suno auth --cookie-stdin` and `suno auth --jwt-stdin` keep credentials out of process arguments.
+
+**Downloads:**
+
+- Downloads use Suno's signed preparation flow instead of stale playback URLs. `--format` supports MP3, WAV, M4A, and MP4; `--source` supports `auto`, `studio`, and `library`; `--video` remains a compatibility shortcut.
+- Auto source selection uses Studio when the account advertises the `studio` feature. Otherwise it authorizes the library item once and prepares a short-lived signed URL. Expired preparation URLs are refreshed without repeating authorization.
+- Downloads validate their file container before the atomic rename; HTML error pages cannot become completed audio files.
+- MP3 lyric embedding remains available. A failed multi-download exits nonzero with completed paths, failed IDs, and a retry argv in `error.details`; successful downloads keep `{downloaded, failed}`.
+
+**Agent workflows and framework:**
+
+- New offline `suno prompt` makes tempo, beat unit, meter, groove, voice, delivery, instruments, arrangement, and exclusions explicit. Original editable examples include comic folk, work song, solo lament, and electronic music. Returned preview/generation argv uses a stable request UUID.
+- Prompting and songwriting guides cite current official sources, remove obsolete model/cost guidance and unsupported rigid rules, and recommend auditioning a pair before batching.
+- Updated to agent-cli-framework cdb6add: Clap-derived syntax, scoped discovery through `agent-info --command` (or `info --command`), compact fallible JSON, single failure envelope with diagnostic details, kernel file locks, and verified standalone updates.
+- `--force` now bypasses only duplicate locking. `--allow-placeholders` explicitly sends literal scaffold markers. `delete --confirm` complements the existing `--yes`.
+
+**Migration:**
+
+- Existing installs with an old persisted override should run `suno config set default_model v6`.
+- Refresh installed agent instructions with `suno skill install` after updating the binary.
+
+The v6 catalogue and limits were live verified. The current generate and download request shapes are supported by web-bundle and independent implementation evidence plus local tests; live v6 generation, MP3/WAV/M4A/MP4 decoding, Studio and Library downloads, Library MP3 authorization, and request-ID replay passed. Strict headless captcha challenges required the existing offscreen fallback on the tested account.
 
 ## v0.8.0 — the composer and the renderer agree about the artifact
 
@@ -34,8 +71,8 @@ One invariant now holds end to end: the file named by the emitted generate comma
 - `--mood` / `--vocal` / `--bpm` / `--instrumental` now drive the Style Prompt, the `[Mood:]`/`[Energy:]`/vocal meta-tags and `suno_tags` from one resolved-controls struct. `--mood "dark and brooding"` no longer emitted `[Mood: Uplifting]` and an "uplifting" tag alongside it.
 - `--instrumental` is coherent: no `<...>` fill instructions, `--instrumental` in the emitted command, no vocal-only tags.
 - Titles and paths in the emitted command are shell-escaped (`She Said "Go"` produced invalid shell).
-- `generate` refuses lyrics containing unresolved `<...>` scaffold placeholders (exit 3, naming the line numbers) so an unfilled draft cannot burn ~70 credits. `--force` overrides.
-- The emitted command no longer pins `--model v4.5-all` while help and config advertise v5.5 — it omits `--model` so the configured default applies, and names the cheap-draft option separately.
+- `generate` refuses lyrics containing unresolved `<...>` scaffold placeholders (exit 3, naming the line numbers) so an unfilled draft cannot spend generation credits. `--force` overrides.
+- The emitted command stopped pinning `--model v4.5-all` and instead used the configured default. At the time of this v0.8.0 release, that default was v5.5; v0.10.1 later moved it to v6.
 - New fields: `placeholders_remaining`, `ready_to_generate`, `missing_requirements`, `project_written`.
 
 **Discovery:**
@@ -61,7 +98,7 @@ One invariant now holds end to end: the file named by the emitted generate comma
 - Fixed the bare `__client` cookie being dropped on the solver's cookie replay — the root cause of "hcaptcha never finished loading" on sub-threshold accounts.
 - `--wait` now exits non-zero when generation fails (moderation rejections exit 3); previously failed clips exited 0.
 - New model `v4.5-all` (chirp-auk-turbo, Suno's "best free model"); `extend` gained `--model`; new `--audio-influence` slider on generate/cover.
-- Documented real credit costs: ≈70 credits per v5.5 call (35/clip), not ~10.
+- Documented the then-observed v5.5 credit cost. Suno's current v6 documentation supersedes that historical value.
 
 **Tooling:**
 

@@ -267,7 +267,7 @@ async fn check_api(checks: &mut Vec<DoctorCheck>, state: AuthState, chrome_avail
         }
         Ok(resp) => {
             let detail = if resp.required {
-                "required: true — generation will pilot Chrome to solve hCaptcha".to_string()
+                "required: true — generation uses the captcha provider selected by Suno".to_string()
             } else {
                 "required: false — solver will be skipped".to_string()
             };
@@ -275,7 +275,7 @@ async fn check_api(checks: &mut Vec<DoctorCheck>, state: AuthState, chrome_avail
         }
         Err(e) => checks.push(DoctorCheck::warn(
             "captcha_preflight",
-            format!("preflight failed: {e} — generation falls back to solving"),
+            format!("preflight failed: {e} — generation cannot choose a provider"),
             None,
         )),
     }
@@ -299,20 +299,20 @@ pub async fn run(fmt: OutputFormat, quiet: bool) -> Result<(), CliError> {
         fail: count(CheckStatus::Fail),
     };
     let has_failures = summary.fail > 0;
-    // The envelope status must reflect the checks: a failing run is not a
-    // "success" envelope that happens to exit 2. Some checks still passing →
-    // partial_success; nothing passed → all_failed.
-    let envelope_status = if !has_failures {
-        "success"
-    } else if summary.pass > 0 {
-        "partial_success"
-    } else {
-        "all_failed"
-    };
     let report = DoctorReport { checks, summary };
+    if has_failures {
+        return Err(CliError::Diagnostic {
+            source: Box::new(CliError::Recovery {
+                source: Box::new(CliError::Config("doctor found failing checks".into())),
+                suggestion: "Fix the failed checks in error.details, then run `suno doctor` again"
+                    .into(),
+            }),
+            details: serde_json::to_value(&report)?,
+        });
+    }
 
     match fmt {
-        OutputFormat::Json => crate::output::json::with_status(envelope_status, &report),
+        OutputFormat::Json => crate::output::json::success(&report)?,
         OutputFormat::Table => {
             for check in &report.checks {
                 let icon = match check.status {
@@ -334,8 +334,5 @@ pub async fn run(fmt: OutputFormat, quiet: bool) -> Result<(), CliError> {
         }
     }
 
-    if has_failures {
-        return Err(CliError::Config("doctor found failing checks".into()));
-    }
     Ok(())
 }

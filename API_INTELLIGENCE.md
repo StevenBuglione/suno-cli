@@ -1,205 +1,276 @@
-# Suno API Intelligence — Reverse-Engineered April 6, 2026
+# Suno API Intelligence — refreshed September 28, 2026
 
-## Auth
-- **Base URL**: `https://studio-api-prod.suno.com`
-- **Auth**: Clerk-based. Browser has Clerk session cookies → exchanges for JWT → JWT used as `Authorization: Bearer <jwt>`
-- **Required headers**:
+Suno does not publish an API contract for the web application. This document separates direct observations from bundle evidence and inference so a route's existence is never confused with a successful end-to-end operation.
+
+## Evidence labels
+
+- **Live verified** — observed against the authenticated account on the stated date.
+- **Public bundle** — present in Suno's publicly served web JavaScript. This supports route and response-shape compatibility but does not prove the current account can complete the operation.
+- **Independent implementation** — corroborated by a pinned public repository source.
+- **Historical capture** — observed previously; retain as a lead, then recapture before changing code.
+- **Inferred** — request details remain incomplete or unexecuted.
+
+Upstream-reported live validation on 2026-09-28 completed v6 custom and description generations, each producing two playable MP3s. The custom pair used 10 credits. Studio MP3, WAV, and M4A downloads and Library MP3, WAV, and MP4 downloads completed through HTTP; FFmpeg decoded every downloaded format. Reusing the saved request ID returned the original clip IDs without another submission. Strict headless challenges expired on this account; the existing offscreen hCaptcha fallback completed generation. Captcha requirements remain account-dependent.
+
+## Primary sources
+
+- Suno, [Current Models: v6](https://help.suno.com/en/articles/13924737) — current family and plan access.
+- Suno, [v6 FAQ](https://help.suno.com/en/articles/13924481) — pre-v6 retirement, standard generation cost, and Max Mode.
+- Suno public bundle, [`0lx_ptoxoz531.js`](https://suno.com/_next/static/immutable/chunks/0lx_ptoxoz531.js) — signed library/Studio preparation routes and preparation states, retrieved 2026-09-28.
+- live-smith, pinned [`suno-download.ts`](https://github.com/SamKuler/live-smith/blob/2e5e65daeedc481da241295b465cc531df25f8b2/src/audio-services/suno-download.ts) and [`suno-http.ts`](https://github.com/SamKuler/live-smith/blob/2e5e65daeedc481da241295b465cc531df25f8b2/src/audio-services/suno-http.ts) — independent download authorization and preparation implementation.
+- suno-toolkits, pinned [September 2026 download investigation](https://github.com/romanticamaj/suno-toolkits/blob/469a315532f4b107a94cde11c1e22d3d47f95263/docs/2026-09-suno-download-limits.md) and [`wav-source.mjs`](https://github.com/romanticamaj/suno-toolkits/blob/469a315532f4b107a94cde11c1e22d3d47f95263/extension/src/app/wav-source.mjs) — independent evidence for the post-change download flow.
+
+### Captcha source snapshot
+
+- [Provider selection and hCaptcha fallback](https://suno.com/_next/static/immutable/chunks/410gkexdr73e7.js)
+- [Turnstile widget integration](https://suno.com/_next/static/immutable/chunks/3sk525-8t_hsm.js)
+- [Public site keys](https://suno.com/_next/static/immutable/chunks/1fnqfl2zkfr3f.js)
+
+## Auth and request headers
+
+- **Base URL:** `https://studio-api-prod.suno.com`
+- **Auth:** Clerk browser cookies can be exchanged for a JWT; API requests use `Authorization: Bearer <jwt>`.
+- **Observed headers:**
   - `authorization: Bearer <jwt>`
-  - `device-id: <uuid>` (from browser, persisted)
-  - `browser-token: {"token":"<base64({"timestamp":<ms>})>"}` (dynamic, generated per-request)
+  - `device-id: <uuid>`
+  - `browser-token: {"token":"<base64 timestamp payload>"}`
   - `origin: https://suno.com`
   - `referer: https://suno.com/`
-- **JWT lifetime**: ~1 hour. Auto-refreshed by Clerk SDK in browser.
-- **Clerk session ID**: Found in JWT `sid` claim (e.g., `session_eece6e4f36131cbcb12aeb`)
+- JWTs are short-lived. A stored Clerk session supports refresh.
+- For automation, the CLI accepts the Clerk cookie or JWT on stdin so the secret is not exposed in process arguments.
 
-## Account Response
-- `/api/billing/info/` returns the active plan, remaining credits, usage period, feature flags, model list, and model limits.
-- Do not commit live account-specific credit balances to this file; they drift quickly and are not useful as implementation evidence.
+## Account catalogue — live verified 2026-09-28
 
-## Models (from /api/billing/info/)
+`GET /api/billing/info/` returns plan information, credits, feature access, generation models, remaster models, and per-model limits. Do not commit account-specific balances because they drift.
 
-Read-only account response rechecked 2026-09-11 (v6 launch). Availability and defaults are account-specific.
+### Current generation models
 
-| Display Name | External Key | Default | Max Prompt | Max Tags | Max Neg Tags | Max GPT Desc |
-|---|---|---|---|---|---|---|
-| **v6** | `chirp-hawk` | **YES** | 5000 | 1000 | 1000 | 3000 |
-| v6-wild | `chirp-hawk-wild` | No | 5000 | 1000 | 1000 | 3000 |
-| v6-mini | `chirp-goose` | No | 5000 | 1000 | 1000 | 3000 |
-| v5.5 | `chirp-fenix` | No | 5000 | 1000 | 1000 | 3000 |
-| v5 | `chirp-crow` | No | 5000 | 1000 | 1000 | 3000 |
-| v4.5+ | `chirp-bluejay` | No | 5000 | 1000 | 1000 | 3000 |
-| v4.5 | `chirp-auk` | No | 5000 | 1000 | 1000 | 3000 |
-| v4.5-all | `chirp-auk-turbo` | Free model | 5000 | 1000 | 1000 | 3000 |
-| v4 | `chirp-v4` | No | 3000 | 200 | 1000 | 3000 |
-| v3.5 | `chirp-v3-5` | No | 3000 | 200 | 1000 | 3000 |
-| v3 | `chirp-v3-0` | No | 3000 | 200 | 1000 | 3000 |
-| v2 | `chirp-v2-xxl-alpha` | No | 3000 | 200 | 1000 | 3000 |
+| Display name | External key | Plan access |
+|---|---|---|
+| v6 | `chirp-hawk` | Pro and Premier |
+| v6-wild | `chirp-hawk-wild` | Pro and Premier |
+| v6-mini | `chirp-goose` | All users |
 
-### Remaster Models
-| Name | Key |
+Suno's official FAQ says every pre-v6 generation model was retired on September 9, 2026. The CLI retains old flag values so existing scripts still parse, then rejects a missing or unavailable catalogue entry before submission.
+
+### Current remaster model
+
+| Display name | External key |
 |---|---|
-| v6 (default) | `chirp-halibut` |
-| v5.5 | `chirp-flounder` |
-| v5 | `chirp-carp` |
-| v4.5+ | `chirp-bass` |
+| v6 | `chirp-halibut` |
 
-v6 remaster (`chirp-halibut`) posts `variation_category` (`subtle` \| `normal` \| `high`, default `normal`) and `style_profile` (`natural` \| `boost` \| `clarity`, default `boost`) to `POST /api/generate/upsample`. v5.5/v5 send variation only; v4.5+ omits both.
+### Current input limits
 
-## Verified Endpoints
+The web forms and CLI count UTF-16 code units, so an emoji can count as two units.
 
-### GET /api/billing/info/
-Returns full account info, credits, plan, models, features, limits.
+| Field | Limit |
+|---|---:|
+| Title | 100 |
+| Custom prompt/lyrics | 5000 |
+| Style tags | 1000 |
+| Excluded styles | 1000 |
+| Simple description | 3000 |
 
-### POST /api/generate/lyrics/
-**Request**: `{"prompt": "description of song"}`
-**Response**: `{"id": "<uuid>"}` (async — poll for result)
+Suno documents standard v6 generation as 10 credits for two songs. Max Mode costs more. The authenticated account response is authoritative for the actual charge and access.
 
-### GET /api/generate/lyrics/{id}
-**Response** (when complete):
+## Generation
+
+### Catalogue validation
+
+Before a paid request, the CLI fetches `/api/billing/info/` and verifies:
+
+1. the external model key belongs to the relevant live catalogue;
+2. the account can use the generation model;
+3. every text field fits the returned limits.
+
+This makes retained pre-v6 flags fail before submission rather than sending a retired key.
+
+### `POST /api/generate/v2-web/`
+
+**Evidence:** live v6 custom generation, completed downloads, and audio decode verification on 2026-09-28.
+
+Representative custom request:
+
 ```json
 {
-  "text": "[Verse 1]\n...\n[Chorus]\n...",
-  "title": "Generated Title",
-  "status": "complete",
-  "error_message": "",
-  "tags": ["style description auto-generated by Suno"]
-}
-```
-
-### POST /api/generate/v2-web/
-**Generate music**. Payload shape captured from the current web route and represented by `src/api/types.rs::GenerateRequest`:
-```json
-{
-  "make_instrumental": false,
-  "mv": "chirp-fenix",
-  "prompt": "",
+  "token": null,
   "generation_type": "TEXT",
-  "continue_at": null,
-  "continue_clip_id": null,
+  "title": "Night Drive",
+  "tags": "indie rock, warm male vocals",
+  "negative_tags": "",
+  "mv": "chirp-hawk",
+  "prompt": "[Verse]\n...",
+  "make_instrumental": false,
+  "user_uploaded_images_b64": null,
   "metadata": {
     "web_client_pathname": "/create",
+    "is_max_mode": false,
+    "is_mumble": false,
     "create_mode": "custom",
-    "create_session_token": "<uuid>"
+    "user_tier": "",
+    "create_session_token": "<uuid>",
+    "disable_volume_normalization": false
   },
-  "token": "<captcha_token>",
-  "tags": "pop, upbeat, synths",
-  "title": "Summer Vibes",
-  "negative_tags": "metal, heavy, dark"
+  "override_fields": [],
+  "cover_clip_id": null,
+  "cover_start_s": null,
+  "cover_end_s": null,
+  "persona_id": null,
+  "artist_clip_id": null,
+  "artist_start_s": null,
+  "artist_end_s": null,
+  "continue_clip_id": null,
+  "continued_aligned_prompt": null,
+  "continue_at": null,
+  "transaction_uuid": "<request UUID>"
 }
 ```
 
-**v6 Custom additions** (live 2026-09-11; omitted unless the caller sets them):
-- top-level `duration`: whole seconds 10–360. Current Web default is 180 when omitted. Description mode does not expose duration (the server ignores or does not honor it).
-- `metadata.control_sliders.aug_creativity`: whole number 0–4 (Variety). Fractions return HTTP 400.
-- `metadata.is_mumble` / `metadata.is_max_mode`: already in the metadata block. v6 gates these on `/api/session/` flags `mumble-mode` and `max-mode`; the CLI sends the flags when requested and Suno remains authoritative.
+Missing titles and tags serialize as empty strings: a live v6 description submission rejected a null title with HTTP 422.
 
-Default `mv` is now `chirp-hawk` (v6). `chirp-hawk-wild` and `chirp-goose` are the wild and mini variants.
+The September 30 public web builder sets Simple/description mode `metadata.create_mode` to `simple`, leaves `prompt` empty, and sends the description in `gpt_description_prompt`. This supersedes the upstream September 28 inspiration-mode description. `--max-mode` sets `metadata.is_max_mode` to `true`.
 
-**IMPORTANT**: Some accounts/flows require a fresh hCaptcha `token` field. The Rust CLI uses a piloted Chrome path when needed and also accepts `--token` for externally supplied solutions. Do **not** send a `token_provider` field: the v2-web endpoint 422s on the string (verified 2026; the CLI dropped it), so only `token` rides on the request body. Whether a captcha is needed at all is answered by the preflight below.
+The current client sends `token` with integer `token_provider`: 1 for hCaptcha, 2 for Turnstile. A string provider name is invalid. Omit the provider when no token is supplied.
 
-### POST /api/c/check
-**Captcha preflight** (verified live 2026-07-18 on both `studio-api-prod.suno.com` and `studio-api.prod.suno.com`). Request: `{"ctype": "generation"}` with Bearer JWT. Response: `{"required": false, "captcha_version": 1}` — `required` is false for accounts above Suno's trust threshold, so the solver can be skipped entirely. When `required` is true, generating one song in the suno.com UI clears the challenge.
+### Captcha preflight: `POST /api/c/check`
 
-**Two modes**:
-1. **Description mode** (`metadata.create_mode = "inspiration"`, `prompt` is the description) — Suno writes lyrics from description
-2. **Custom mode** (`metadata.create_mode = "custom"`, `prompt` = lyrics, `tags` + `title` + `negative_tags` set)
+Request: `{"ctype":"generation"}` with Bearer authentication. Live response on 2026-09-28: `{"required":true,"captcha_version":2}`. Current public client code maps 1 to hCaptcha, 2 to Cloudflare Turnstile, and latches an hCaptcha fallback after Turnstile failure.
 
-**Response**: `{"clips": [...], "metadata": {...}, "status": "..."}`
+- Default operation may use browser automation only when the preflight requires it, including the existing offscreen fallback.
+- Global `--headless` allows invisible Chrome and forbids a visible fallback.
+- Global `--no-browser` performs HTTP only and returns `captcha_required` if solving needs a browser.
+- `--token` accepts an externally solved token; `--token-provider 1|2` selects its provider. Command-level `--no-captcha` disables the built-in solver.
 
-### POST /api/generate/concat/v2/
-Concatenate/extend clips. `{"clip_id": "<id>"}`
+Strict headless hCaptcha expired and strict headless Turnstile timed out before submission. Offscreen hCaptcha succeeded. CDP calls now use an absolute deadline so background events cannot extend a stuck solve indefinitely.
 
-### POST /api/feed/v3
-**Request**: `{"cursor": "<opaque next_cursor from previous response>", "limit": 20, "filters": {...}}` — omit `cursor` for the first page. Page numbers are NOT accepted.
-**Response**: `{"clips": [...], "next_cursor": "...", "has_more": true}`
+## Paid-request recovery and idempotency
 
-Clip structure:
-```
-id, title, status, model_name, audio_url, audio_url_2, video_url,
-image_url, image_large_url, created_at, play_count, upvote_count,
-metadata: { tags, prompt, duration, avg_bpm, min_bpm, max_bpm,
-            has_stem, is_mumble, is_remix, make_instrumental, type,
-            can_remix, priority, stream, uses_latest_model }
+The CLI reserves a `0600` receipt before sending the paid POST. A receipt contains:
+
+```json
+{
+  "transaction_id": "<uuid>",
+  "request_sha256": "<hash>",
+  "updated_at": "<timestamp>",
+  "state": "submitting | submitted | submission_unknown | rejected",
+  "ids": ["<clip id>"],
+  "next_action": {"argv": ["suno", "status", "<clip id>", "--wait"]}
+}
 ```
 
-### GET /api/playlist/me
-User's playlists. Returns `{"num_total_results": N, "current_page": N, "playlists": [...]}`
+Receipts omit credentials, captcha tokens, and lyric text. `--request-id UUID` supplies the transaction identity. The same ID plus the same submitted payload reuses saved clip IDs. A changed payload or `submission_unknown` receipt is rejected rather than replaying a possibly accepted paid request.
 
-### GET /api/trending/
-Trending clips. Returns playlist-like structure.
+Recovery sequence:
 
-### POST /api/edit/stems/{clip_id}
-Stem separation. Endpoint per gcui-art/paean-ai evidence; implemented in
-`src/api/stems.rs`. (An earlier capture guessed `/api/generate/stems/` —
-wrong path.)
+1. `suno jobs`
+2. if the receipt has IDs, `suno status <ids> --wait --download DIR`
+3. if its outcome is unknown and it has no IDs, inspect `suno list` before any manual retry
 
-### POST /api/cover/
-Cover generation (not tested, likely needs POST).
+`status` never submits generation. `--download` implies `--wait`, and downloaded clip objects include `local_path`.
 
-### POST /api/remaster/
-Remaster with different model (not tested).
+## Signed downloads
 
-## Voices / Persona Creation Flow (captured April 6, 2026)
+Playback URLs are not treated as download contracts. The current flow prepares a short-lived signed URL, polls preparation states, and transfers bytes atomically through a `.part` file.
 
-Full pipeline for creating a Voice persona from audio:
+### Source selection
 
-### Step 1: Upload initial voice sample
-The S3 presigned upload happens first (not captured here), then:
+`--source auto` reads `accessible_features` from `/api/billing/info/`:
+
+- feature `studio` present → Studio preparation;
+- otherwise → Library authorization and preparation.
+
+MP4 uses the Library route. `--source studio` and `--source library` override auto selection.
+
+### Studio preparation
+
+```text
+GET /api/studio/clip/{clip_id}/download?format={format}
 ```
-POST /api/uploads/audio/{upload_id}/upload-finish/
-```
-Response: `200 OK` (empty body, content-length: 2)
 
-### Step 2: Poll upload status
-```
-GET /api/uploads/audio/{upload_id}/
-```
-Response: JSON with processing status.
+**Evidence:** Suno public bundle, independent implementations, and live Studio MP3/WAV downloads on 2026-09-28. The response progresses through `processing` to `ready` with a `download_url`; `rate_limited` is also handled. The CLI polls for at most three minutes.
 
-### Step 3: Extract vocal stem
+### Library authorization and preparation
+
+Authorize once when the clip is not already unlocked:
+
+```text
+POST /api/download/authorize
+{"item_id":"<clip_id>","item_type":"clip"}
 ```
-POST /api/processed_clip/voice-vox-stem
-Content-Length: ~90 bytes
+
+Then prepare:
+
+```text
+GET /api/download/clip/{clip_id}?format={format}
 ```
-Extracts clean vocals from uploaded audio. Body likely: `{"upload_id": "<id>"}`.
-Called multiple times — once per upload (sample + verification).
 
-### Step 4: Record & upload verification phrase
-User reads: "Listening to the melody of a gentle summer breeze"
-Second upload goes through the same upload-finish flow with a new upload_id.
+**Evidence:** The Suno bundle directly supports MP3 and M4A on the Library path. Its WAV flow still references `convert_wav` followed by `wav_file`; independent repositories corroborate the authorization/preparation family. The CLI follows that separate WAV conversion path for Library downloads; it is covered by a local server test. Studio MP3/WAV/M4A and Library MP3/WAV/MP4 were live verified and decoded on September 28. Library M4A is supported by source evidence but has not been separately live tested.
 
-### Step 5: Voice verification
-```
-POST /api/voice-verification/
-Content-Length: 179 bytes
-```
-Verifies the voice matches. Body likely includes both upload IDs + verification text.
+If byte transfer fails because a prepared URL expired, the CLI prepares a fresh URL once without repeating Library authorization.
 
-### Step 6: Create persona
-```
-POST /api/persona/create/
-Content-Length: 47261 bytes (large — likely includes audio data as base64)
-```
-Creates the voice persona from the verified audio clips.
+### CLI formats
 
-### Endpoints summary:
-- `POST /api/uploads/audio/{id}/upload-finish/` — mark upload complete
-- `GET /api/uploads/audio/{id}/` — poll upload processing
-- `POST /api/processed_clip/voice-vox-stem` — extract vocals
-- `POST /api/voice-verification/` — verify voice sample
-- `POST /api/persona/create/` — create voice persona (47KB payload)
+The CLI surface accepts `mp3`, `wav`, `m4a`, and `mp4`; `--video` remains a compatibility shortcut for MP4. MP3 downloads also receive plain USLT and timed SYLT lyric tags. Successful multi-file JSON is `{downloaded, failed}`. Any failed item causes a nonzero exit with completed paths, failed IDs, and a retry argv in `error.details`.
 
-### To implement in CLI:
-Need to capture the REQUEST BODIES (not just headers) to see exact JSON payloads.
-The S3 presigned upload step (before upload-finish) also needs capturing.
+## Other endpoints
 
-## Key Insights for Rust CLI
+| Route | Evidence | Purpose |
+|---|---|---|
+| `POST /api/feed/v3` | Previously live verified | Opaque-cursor library feed |
+| `POST /api/generate/lyrics/` | Previously live verified | Start lyrics-only generation |
+| `GET /api/generate/lyrics/{id}` | Previously live verified | Poll lyrics-only result |
+| `GET /api/gen/{id}/aligned_lyrics/v2/` | Previously live verified | Word-level timed lyrics |
+| `POST /api/generate/concat/v2/` | Previously live verified | Concatenate a clip |
+| `POST /api/edit/stems/{clip_id}` | Independent implementation | Stem separation |
+| `POST /api/cover/` | Historical/inferred | Older cover route; current CLI uses the unified generation shape |
+| `POST /api/remaster/` | Historical/inferred | Older remaster route; current fork uses `/api/generate/upsample` |
 
-1. **Captcha is the main challenge** — generation requires a captcha token that gcui-art solves via Playwright browser automation
-2. **Lyrics generation is free and easy** — no captcha needed, just JWT auth
-3. **JWT refresh** — need Clerk cookie exchange or session keepalive
-4. **Browser-token header** — dynamically generated from current timestamp, base64-encoded
-5. **Cookie-based approach** — store Clerk session cookies, exchange for JWT via `auth.suno.com/v1/client/sessions/<session_id>/tokens`
-6. **Two auth strategies**:
-   a. Cookie-based: Store browser cookies, auto-refresh JWT (what gcui-art does)
-   b. Direct JWT: User pastes JWT, works for ~1 hour (simpler but expires)
+`POST /api/feed/v3` accepts the opaque `next_cursor` from the preceding response. Page numbers are not part of this route.
+
+## Historical voice/persona capture — April 6, 2026
+
+Keep these as recapture leads. Their request bodies were not fully captured and they are not evidence of the September 2026 UI.
+
+1. Upload finish: `POST /api/uploads/audio/{upload_id}/upload-finish/`
+2. Poll upload: `GET /api/uploads/audio/{upload_id}/`
+3. Extract vocals: `POST /api/processed_clip/voice-vox-stem`
+4. Upload a verification phrase through the same upload flow
+5. Verify voice: `POST /api/voice-verification/`
+6. Create persona: `POST /api/persona/create/`
+
+Missing evidence:
+
+- the presigned upload request before `upload-finish`;
+- exact JSON bodies for vocal extraction and voice verification;
+- the exact persona creation body.
+
+Recapture these bodies from the current web application before implementing persona creation.
+
+
+## Fork source inspection — 2026-09-30
+
+This section records public website code retrieved from script URLs present in `https://suno.com/create`. It is source evidence, not an authenticated network capture or successful provider execution. No account credentials are included. The locally downloaded files remain ignored under `target/suno-web/`.
+
+| Source | SHA256 | Evidence |
+|---|---|---|
+| [3arc5n0i_d7m9.js](https://suno.com/_next/static/immutable/chunks/3arc5n0i_d7m9.js) | `86826605728243a145303058eff76b696f70bfcec7a4e06e38e79f617583a5ff` | Custom/simple mode; reference task selection; cover/infill/underpaint/overpaint; crop/cut actions; speed/reverse |
+| [2y0h4afq1x13q.js](https://suno.com/_next/static/immutable/chunks/2y0h4afq1x13q.js) | `2976d0f22cca6a965dcafb11bbcf5c3906399eb6f4850919e3b45f61119a7926` | Dedicated remaster upsample route and variation/profile fields |
+| [31atzq-j91xet.js](https://suno.com/_next/static/immutable/chunks/31atzq-j91xet.js) | `bf6a73895142be0282b20d82985aec5655356090961ff4bf194afe43a770dbb0` | Upload initiation/finish/status/clip initialization; not implemented in this fork |
+
+The builder emits `metadata.create_mode: custom|simple`. Reference operations have a separate top-level task: `cover`, `extend`, `infill`, `underpainting`, or `overpainting`. A cover carries `cover_clip_id`, optional reference bounds, and `metadata.is_remix: true`. No special v6 cover model is selected. Sliders send normalized `weirdness_constraint`, `style_weight`, and `audio_weight`; variety is an integer `aug_creativity`. Vocal direction is `metadata.vocal_gender`.
+
+Infill carries `continue_clip_id`, context lyrics in `prompt`, requested lyrics in `continued_aligned_prompt`, replacement section text in `metadata.infill_lyrics`, and range/context bounds. The web builder omits `make_instrumental` for infill. The fork uses full-song context; this context policy and the resulting musical quality remain unqualified on a live account. Add-vocals uses `overpainting_clip_id`; accompaniment uses `underpainting_clip_id`.
+
+Current voice-persona task selection is `vox`, `vox_cover`, `vox_extend`, or `artist_infill`, with `persona_id` and prompt/tag overrides. Legacy persona tasks (`artist_consistency`, `artist_cover`, etc.) need source/version selection and are not exposed here. Voice recording, verification, and creation remain web UI operations.
+
+The source also shows:
+
+- `POST /api/edit/crop/{clip_id}/`: `crop_start_s`, `crop_end_s`, `is_crop_remove`, `title`, `ui_surface: song_actions`. Response: `action_clip_id`.
+- `GET /api/edit/action/{action_clip_id}/`: poll worker state before reading the clip; `error` must fail.
+- `POST /api/clips/adjust-speed/`: `clip_id`, `speed_multiplier`, `keep_pitch`, `title`.
+- `POST /api/clips/reverse-clip/`: `clip_id`, `title`.
+- `POST /api/generate/upsample`: `clip_id`, `model_name`, `variation_category`, `style_profile`.
+
+Local tests cover payloads, offline source inheritance, invalid ranges, explicit voice tasks, worker failure, polling, and duplicate-request recovery. Windows browser extraction failed despite a signed-in Chrome session, so the fork provides `auth --browser-login`: an isolated temporary profile and loopback CDP endpoint, scoped Suno cookies, active Clerk session verification, a bounded login window, and no credential output. Signing in to the separate window is required; a regular browser sign-in is not automatically shared.
+
+Use `scripts/verify-live.ps1` for account checks, a small generation plus a cover, and downloaded-file evidence. Until that run succeeds, this fork's generation, covers, edits, and signed downloads must not be described as live verified. Studio multitrack editing, uploads, persona creation, mashups, and custom model training are not implemented.
